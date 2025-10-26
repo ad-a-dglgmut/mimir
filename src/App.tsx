@@ -21,13 +21,15 @@ import {
   Zap,
   Activity,
   FileDown,
+  Moon,
+  Sun,
 } from "lucide-react"
 import { Window } from "@tauri-apps/api/window"
 import { invoke } from "@tauri-apps/api/core"
 import { listen } from "@tauri-apps/api/event"
 import "./App.css"
+import { Drawer, DrawerContent, DrawerHeader, DrawerFooter, DrawerTitle } from "./components/ui/drawer"
 
-// --- Types ---
 interface AnalysisResponse {
   raw_output: string
   code: string
@@ -59,7 +61,6 @@ interface ChatInfo {
   csv_path: any
 }
 
-// --- Component ---
 export default function MimirApp() {
   const [csvPath, setCsvPath] = useState<string>("")
   const [fileName, setFileName] = useState<string>("")
@@ -67,6 +68,8 @@ export default function MimirApp() {
   const [loading, setLoading] = useState<boolean>(false)
   const [history, setHistory] = useState<HistoryItem[]>([])
   const [isDragging, setIsDragging] = useState<boolean>(false)
+
+  const [theme, setTheme] = useState<"light" | "dark">("dark")
 
   // Chat management state
   const [chats, setChats] = useState<ChatInfo[]>([])
@@ -77,23 +80,24 @@ export default function MimirApp() {
 
   const [globalRecommendedPrompts, setGlobalRecommendedPrompts] = useState<string[]>([])
 
-  // Ref for scrolling to newest message
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const historyContainerRef = useRef<HTMLDivElement>(null)
 
-  // --- Scroll to bottom when new message is added ---
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
   }, [history])
 
-  // --- Load initial data ---
+  useEffect(() => {
+    document.documentElement.classList.toggle("dark", theme === "dark")
+    document.documentElement.classList.toggle("light", theme === "light")
+  }, [theme])
+
   useEffect(() => {
     loadCurrentChat()
     loadChatList()
     loadGlobalRecommendedPrompts()
   }, [])
 
-  // --- Load global recommended prompts ---
   const loadGlobalRecommendedPrompts = async () => {
     const generalPrompts = [
       "Show me the first 5 rows of the dataset",
@@ -108,11 +112,9 @@ export default function MimirApp() {
     setGlobalRecommendedPrompts(generalPrompts)
   }
 
-  // --- Load current chat history and CSV path ---
   const loadCurrentChat = async () => {
     try {
       const history = await invoke<HistoryItem[]>("get_history")
-      // Reverse the history so newest messages are first
       const reversedHistory = history.reverse().map((item) => ({
         ...item,
         showRecommendedPrompts: item.showRecommendedPrompts ?? true,
@@ -124,7 +126,6 @@ export default function MimirApp() {
         setCsvPath(csvPath)
         setFileName(csvPath.split(/[\\/]/).pop() || "")
       } else {
-        // Clear CSV info when switching to a chat without CSV
         clearCsvInfo()
       }
     } catch (err) {
@@ -133,13 +134,11 @@ export default function MimirApp() {
     }
   }
 
-  // --- Clear CSV info ---
   const clearCsvInfo = () => {
     setFileName("")
     setCsvPath("")
   }
 
-  // --- Load chat list ---
   const loadChatList = async () => {
     try {
       const chatList = await invoke<ChatInfo[]>("list_chats")
@@ -149,7 +148,6 @@ export default function MimirApp() {
     }
   }
 
-  // --- Get current chat name ---
   const loadCurrentChatName = async () => {
     try {
       const chatName = await invoke<string>("get_current_chat")
@@ -159,7 +157,6 @@ export default function MimirApp() {
     }
   }
 
-  // --- Create new chat ---
   const handleCreateChat = async () => {
     if (!newChatName.trim()) return
 
@@ -170,13 +167,12 @@ export default function MimirApp() {
       await loadChatList()
       await loadCurrentChatName()
       await loadCurrentChat()
-      clearCsvInfo() // Clear CSV info for new chat
+      clearCsvInfo()
     } catch (err) {
       alert(`Failed to create chat: ${err}`)
     }
   }
 
-  // --- Switch chat ---
   const handleSwitchChat = async (chatName: string) => {
     try {
       await invoke("switch_chat", { chatName })
@@ -187,7 +183,6 @@ export default function MimirApp() {
     }
   }
 
-  // --- Delete chat ---
   const handleDeleteChat = async (chatName: string) => {
     if (!confirm(`Are you sure you want to delete chat "${chatName}"?`)) return
 
@@ -209,7 +204,6 @@ export default function MimirApp() {
     }
   }
 
-  // --- Set CSV path for current chat ---
   const setCsvPathForChat = async (path: string) => {
     try {
       await invoke("set_csv_path", { csvPath: path })
@@ -230,7 +224,6 @@ export default function MimirApp() {
     }
   }, [])
 
-  // --- Analyze query ---
   const handleAnalyze = async () => {
     if (!query.trim()) return
     if (!csvPath) {
@@ -248,12 +241,10 @@ export default function MimirApp() {
       await loadCurrentChat()
 
       setQuery("")
-      
-      // Scroll to the top to show the new question (since newest are at top)
-      setTimeout(() => {
-        historyContainerRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
-      }, 100)
 
+      setTimeout(() => {
+        historyContainerRef.current?.scrollTo({ top: 0, behavior: "smooth" })
+      }, 100)
     } catch (err) {
       const errorItem: HistoryItem = {
         id: Date.now(),
@@ -268,24 +259,20 @@ export default function MimirApp() {
         timestamp: new Date().toLocaleTimeString(),
         showRecommendedPrompts: true,
       }
-      // Add new error to the beginning of the array
       setHistory((prev) => [errorItem, ...prev])
-      
-      // Scroll to the top to show the new error
+
       setTimeout(() => {
-        historyContainerRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
+        historyContainerRef.current?.scrollTo({ top: 0, behavior: "smooth" })
       }, 100)
     } finally {
       setLoading(false)
     }
   }
 
-  // --- Handle recommended prompt click ---
   const handlePromptClick = (prompt: string) => {
     setQuery(prompt)
   }
 
-  // --- Toggle recommended prompts visibility for a specific history item ---
   const toggleItemRecommendedPrompts = (itemId: number) => {
     setHistory((prev) =>
       prev.map((item) =>
@@ -294,7 +281,6 @@ export default function MimirApp() {
     )
   }
 
-  // --- Enhanced drag and drop handlers ---
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault()
     setIsDragging(true)
@@ -308,10 +294,10 @@ export default function MimirApp() {
   const handleDrop = async (e: React.DragEvent) => {
     e.preventDefault()
     setIsDragging(false)
-    
+
     const files = Array.from(e.dataTransfer.files)
-    const csvFile = files.find(file => file.name.toLowerCase().endsWith('.csv'))
-    
+    const csvFile = files.find((file) => file.name.toLowerCase().endsWith(".csv"))
+
     if (csvFile) {
       try {
         await setCsvPathForChat(csvFile.path)
@@ -324,7 +310,6 @@ export default function MimirApp() {
     }
   }
 
-  // --- Listen for file drops in Tauri ---
   useEffect(() => {
     const mainWindow = new Window("main")
 
@@ -352,194 +337,186 @@ export default function MimirApp() {
     }
   }, [])
 
-  // --- Enhanced Chart renderer with ECharts ---
   const ChartRenderer = ({ chartJson }: { chartJson?: string }) => {
     const chartRef = useRef<HTMLDivElement>(null)
     const containerRef = useRef<HTMLDivElement>(null)
-    const [chartError, setChartError] = useState<string>('')
+    const [chartError, setChartError] = useState<string>("")
 
     useEffect(() => {
       if (!chartJson || !chartRef.current) {
-        console.log('ChartRenderer: No chartJson or chartRef')
+        console.log("ChartRenderer: No chartJson or chartRef")
         return
       }
 
       try {
         const config = JSON.parse(chartJson)
-        console.log('ChartRenderer: Parsed config:', config)
+        console.log("ChartRenderer: Parsed config:", config)
 
-        // Initialize chart
-        const chart = echarts.init(chartRef.current, 'dark')
+        const chart = echarts.init(chartRef.current, theme === "dark" ? "dark" : undefined)
 
-        // Enhanced config for better handling of large datasets and axis labels
         const enhancedConfig = {
           ...config,
-          backgroundColor: 'transparent',
+          backgroundColor: "transparent",
           textStyle: {
-            color: '#ffffff',
+            color: theme === "dark" ? "#F9F9F9" : "#1a1a1a",
             fontSize: 12,
           },
           dataZoom: [
             {
-              type: 'slider',
+              type: "slider",
               show: true,
               xAxisIndex: 0,
-              left: '3%',
-              right: '4%',
-              bottom: '3%',
+              left: "3%",
+              right: "4%",
+              bottom: "3%",
               height: 20,
-              borderColor: 'hsl(220 15% 18%)',
+              borderColor: theme === "dark" ? "hsl(220 15% 18%)" : "hsl(220 15% 85%)",
               textStyle: {
-                color: '#ffffff'
+                color: theme === "dark" ? "#F9F9F9" : "#1a1a1a",
               },
               handleStyle: {
-                color: 'hsl(220 15% 18%)',
-                borderColor: '#ffffff'
-              }
+                color: theme === "dark" ? "hsl(220 15% 18%)" : "#0093F8",
+                borderColor: theme === "dark" ? "#F9F9F9" : "#0093F8",
+              },
             },
             {
-              type: 'inside',
+              type: "inside",
               xAxisIndex: 0,
               zoomOnMouseWheel: false,
               moveOnMouseMove: true,
-              moveOnMouseWheel: true
-            }
+              moveOnMouseWheel: true,
+            },
           ],
           tooltip: {
-            trigger: 'axis',
-            backgroundColor: 'rgba(0, 0, 0, 0.8)',
-            borderColor: 'hsl(220 15% 18%)',
+            trigger: "axis",
+            backgroundColor: theme === "dark" ? "rgba(0, 0, 0, 0.8)" : "rgba(255, 255, 255, 0.95)",
+            borderColor: theme === "dark" ? "hsl(220 15% 18%)" : "#0093F8",
             textStyle: {
-              color: '#ffffff'
+              color: theme === "dark" ? "#F9F9F9" : "#1a1a1a",
             },
-            ...config.tooltip
+            ...config.tooltip,
           },
-          // Enhanced axis label handling
-          xAxis: config.xAxis ? (Array.isArray(config.xAxis) 
-            ? config.xAxis.map((axis: any) => ({
-                ...axis,
-                axisLabel: {
-                  color: '#ffffff',
-                  fontSize: 11,
-                  interval: 0, // Show all labels
-                  rotate: axis.axisLabel?.rotate || (axis.data?.length > 10 ? 45 : 0), // Auto-rotate if many labels
-                  ...axis.axisLabel,
-                },
-                axisLine: {
-                  lineStyle: {
-                    color: 'hsl(220 15% 18%)',
+          xAxis: config.xAxis
+            ? Array.isArray(config.xAxis)
+              ? config.xAxis.map((axis: any) => ({
+                  ...axis,
+                  axisLabel: {
+                    color: theme === "dark" ? "#F9F9F9" : "#1a1a1a",
+                    fontSize: 11,
+                    interval: 0,
+                    rotate: axis.axisLabel?.rotate || (axis.data?.length > 10 ? 45 : 0),
+                    ...axis.axisLabel,
                   },
-                  ...axis.axisLine,
-                },
-              }))
-            : {
-                ...config.xAxis,
-                axisLabel: {
-                  color: '#ffffff',
-                  fontSize: 11,
-                  interval: 0, // Show all labels
-                  rotate: config.xAxis.axisLabel?.rotate || (config.xAxis.data?.length > 10 ? 45 : 0),
-                  ...config.xAxis.axisLabel,
-                },
-                axisLine: {
-                  lineStyle: {
-                    color: 'hsl(220 15% 18%)',
+                  axisLine: {
+                    lineStyle: {
+                      color: theme === "dark" ? "hsl(220 15% 18%)" : "hsl(220 15% 85%)",
+                    },
+                    ...axis.axisLine,
                   },
-                  ...config.xAxis.axisLine,
-                },
-              }) : undefined,
-          yAxis: config.yAxis ? (Array.isArray(config.yAxis)
-            ? config.yAxis.map((axis: any) => ({
-                ...axis,
-                axisLabel: {
-                  color: '#ffffff',
-                  fontSize: 11,
-                  ...axis.axisLabel,
-                },
-                axisLine: {
-                  lineStyle: {
-                    color: 'hsl(220 15% 18%)',
+                }))
+              : {
+                  ...config.xAxis,
+                  axisLabel: {
+                    color: theme === "dark" ? "#F9F9F9" : "#1a1a1a",
+                    fontSize: 11,
+                    interval: 0,
+                    rotate: config.xAxis.axisLabel?.rotate || (config.xAxis.data?.length > 10 ? 45 : 0),
+                    ...config.xAxis.axisLabel,
                   },
-                  ...axis.axisLine,
-                },
-              }))
-            : {
-                ...config.yAxis,
-                axisLabel: {
-                  color: '#ffffff',
-                  fontSize: 11,
-                  ...config.yAxis.axisLabel,
-                },
-                axisLine: {
-                  lineStyle: {
-                    color: 'hsl(220 15% 18%)',
+                  axisLine: {
+                    lineStyle: {
+                      color: theme === "dark" ? "hsl(220 15% 18%)" : "hsl(220 15% 85%)",
+                    },
+                    ...config.xAxis.axisLine,
                   },
-                  ...config.yAxis.axisLine,
-                },
-              }) : undefined,
+                }
+            : undefined,
+          yAxis: config.yAxis
+            ? Array.isArray(config.yAxis)
+              ? config.yAxis.map((axis: any) => ({
+                  ...axis,
+                  axisLabel: {
+                    color: theme === "dark" ? "#F9F9F9" : "#1a1a1a",
+                    fontSize: 11,
+                    ...axis.axisLabel,
+                  },
+                  axisLine: {
+                    lineStyle: {
+                      color: theme === "dark" ? "hsl(220 15% 18%)" : "hsl(220 15% 85%)",
+                    },
+                    ...axis.axisLine,
+                  },
+                }))
+              : {
+                  ...config.yAxis,
+                  axisLabel: {
+                    color: theme === "dark" ? "#F9F9F9" : "#1a1a1a",
+                    fontSize: 11,
+                    ...config.yAxis.axisLabel,
+                  },
+                  axisLine: {
+                    lineStyle: {
+                      color: theme === "dark" ? "hsl(220 15% 18%)" : "hsl(220 15% 85%)",
+                    },
+                    ...config.yAxis.axisLine,
+                  },
+                }
+            : undefined,
           grid: {
-            left: '3%',
-            right: '4%',
-            bottom: '15%', // Extra space for data zoom
-            top: config.title ? '15%' : '3%',
+            left: "3%",
+            right: "4%",
+            bottom: "15%",
+            top: config.title ? "15%" : "3%",
             containLabel: true,
             ...config.grid,
           },
-          // Enhanced series for better performance
           series: config.series?.map((series: any) => ({
             ...series,
             large: true,
             progressive: 200,
             progressiveThreshold: 1000,
-          }))
+          })),
         }
 
         chart.setOption(enhancedConfig)
 
         const handleResize = () => chart.resize()
-        window.addEventListener('resize', handleResize)
+        window.addEventListener("resize", handleResize)
 
-        // Initial resize
         setTimeout(() => chart.resize(), 100)
 
         return () => {
-          window.removeEventListener('resize', handleResize)
+          window.removeEventListener("resize", handleResize)
           chart.dispose()
         }
       } catch (err) {
-        console.error('ChartRenderer: Failed to render chart:', err)
-        setChartError(`Failed to render chart: ${err instanceof Error ? err.message : 'Unknown error'}`)
+        console.error("ChartRenderer: Failed to render chart:", err)
+        setChartError(`Failed to render chart: ${err instanceof Error ? err.message : "Unknown error"}`)
       }
-    }, [chartJson])
+    }, [chartJson, theme])
 
     if (!chartJson) return null
 
     return (
-      <div className="bg-card border border-border rounded-lg p-6">
+      <div className="bg-card border-2 border-primary/20 rounded-xl p-6 shadow-lg shadow-primary/5">
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2">
             <Activity className="w-5 h-5 text-primary" />
-            <h3 className="font-semibold text-white">Visualization</h3>
+            <h3 className="font-semibold text-foreground">Visualization</h3>
           </div>
-          <div className="text-xs text-white/60">
-            Drag to pan • Scroll to zoom
-          </div>
+          <div className="text-xs text-muted-foreground">Drag to pan • Scroll to zoom</div>
         </div>
-        <div 
-          ref={containerRef}
-          className="w-full overflow-x-auto"
-        >
-          <div 
-            ref={chartRef} 
-            className="w-full h-[400px] min-w-[600px] bg-gradient-to-br from-secondary/30 to-secondary/10 rounded border border-border"
-            style={{ minHeight: '400px' }}
+        <div ref={containerRef} className="w-full overflow-x-auto">
+          <div
+            ref={chartRef}
+            className="w-full h-[400px] min-w-[600px] bg-gradient-to-br from-secondary/50 to-accent/30 rounded-lg border border-border"
+            style={{ minHeight: "400px" }}
           />
         </div>
       </div>
     )
   }
 
-  // --- Render recommended prompts for a specific history item ---
   const renderItemRecommendedPrompts = (item: HistoryItem) => {
     const promptsToShow =
       item.response.recommended_prompts && item.response.recommended_prompts.length > 0
@@ -549,15 +526,15 @@ export default function MimirApp() {
     if (!item.showRecommendedPrompts || promptsToShow.length === 0) return null
 
     return (
-      <section className="bg-card/80 border border-primary/20 rounded-lg p-4 sm:p-6 mt-4">
+      <section className="bg-gradient-to-br from-primary/5 to-primary/10 border-2 border-primary/30 rounded-xl p-4 sm:p-6 mt-4 shadow-md">
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2">
             <Lightbulb className="w-5 h-5 text-primary" />
-            <h3 className="font-semibold text-white">Suggested Follow-up Questions</h3>
+            <h3 className="font-semibold text-foreground">Suggested Follow-up Questions</h3>
           </div>
           <button
             onClick={() => toggleItemRecommendedPrompts(item.id)}
-            className="p-1 text-primary hover:bg-primary/10 rounded transition-colors"
+            className="p-1.5 text-primary hover:bg-primary/20 rounded-lg transition-all"
             title="Hide suggestions"
           >
             <ChevronUp className="w-4 h-4" />
@@ -569,10 +546,10 @@ export default function MimirApp() {
             <button
               key={index}
               onClick={() => handlePromptClick(prompt)}
-              className="text-left p-3 bg-secondary hover:bg-secondary/80 rounded-lg border border-border transition-all text-sm text-white hover:border-primary/50 group"
+              className="text-left p-3 bg-card hover:bg-accent rounded-lg border-2 border-border hover:border-primary/50 transition-all text-sm text-foreground group shadow-sm hover:shadow-md"
             >
               <div className="flex items-start gap-2">
-                <Sparkles className="w-4 h-4 text-primary mt-0.5 flex-shrink-0" />
+                <Sparkles className="w-4 h-4 text-primary mt-0.5 flex-shrink-0 group-hover:scale-110 transition-transform" />
                 <span className="flex-1 break-words">{prompt}</span>
               </div>
             </button>
@@ -582,15 +559,14 @@ export default function MimirApp() {
     )
   }
 
-  // --- Render initial recommended prompts ---
   const renderInitialRecommendedPrompts = () => {
     if (history.length > 0 || globalRecommendedPrompts.length === 0) return null
 
     return (
-      <section className="bg-card/80 border border-primary/20 rounded-lg p-4 sm:p-6 mb-6">
+      <section className="bg-gradient-to-br from-primary/5 to-primary/10 border-2 border-primary/30 rounded-xl p-4 sm:p-6 mb-6 shadow-md">
         <div className="flex items-center gap-2 mb-4">
           <Lightbulb className="w-5 h-5 text-primary" />
-          <h3 className="font-semibold text-white">Suggested Questions</h3>
+          <h3 className="font-semibold text-foreground">Suggested Questions</h3>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
@@ -598,10 +574,10 @@ export default function MimirApp() {
             <button
               key={index}
               onClick={() => handlePromptClick(prompt)}
-              className="text-left p-3 bg-secondary hover:bg-secondary/80 rounded-lg border border-border transition-all text-sm text-white hover:border-primary/50 group"
+              className="text-left p-3 bg-card hover:bg-accent rounded-lg border-2 border-border hover:border-primary/50 transition-all text-sm text-foreground group shadow-sm hover:shadow-md"
             >
               <div className="flex items-start gap-2">
-                <Sparkles className="w-4 h-4 text-primary mt-0.5 flex-shrink-0" />
+                <Sparkles className="w-4 h-4 text-primary mt-0.5 flex-shrink-0 group-hover:scale-110 transition-transform" />
                 <span className="flex-1 break-words">{prompt}</span>
               </div>
             </button>
@@ -611,21 +587,20 @@ export default function MimirApp() {
     )
   }
 
-  // --- Render Mimir recommends ---
   const renderMimirRecommends = (recommendations?: string[]) => {
     if (!recommendations || recommendations.length === 0) return null
 
     return (
-      <div className="bg-card/80 border border-primary/30 rounded-lg p-6">
+      <div className="bg-gradient-to-br from-primary/5 to-accent/10 border-2 border-primary/30 rounded-xl p-6 shadow-md">
         <div className="flex items-center gap-2 mb-4">
           <Brain className="w-5 h-5 text-primary" />
-          <h3 className="font-semibold text-white">Mimir's Insights</h3>
+          <h3 className="font-semibold text-foreground">Mimir Recommends</h3>
         </div>
         <div className="space-y-3">
           {recommendations.map((recommendation, index) => (
-            <div key={index} className="flex items-start gap-3 p-3 bg-secondary rounded-lg border border-border">
-              <div className="w-2 h-2 bg-primary rounded-full mt-2 flex-shrink-0" />
-              <p className="text-sm text-white flex-1 break-words">{recommendation}</p>
+            <div key={index} className="flex items-start gap-3 p-3 bg-card rounded-lg border-2 border-border shadow-sm">
+              <div className="w-2 h-2 bg-primary rounded-full mt-2 flex-shrink-0 shadow-sm shadow-primary/50" />
+              <p className="text-sm text-foreground flex-1 break-words">{recommendation}</p>
             </div>
           ))}
         </div>
@@ -634,20 +609,20 @@ export default function MimirApp() {
   }
 
   return (
-    <div className="min-h-screen bg-background animated-gradient flex overflow-hidden dark">
+    <div className={`min-h-screen bg-background animated-gradient flex overflow-hidden ${theme}`}>
       {/* Chat Sidebar */}
-      {showChatSidebar && (
-        <div className="fixed lg:relative inset-y-0 left-0 z-40 w-80 bg-card/90 border-r border-border flex flex-col lg:flex">
+      <Drawer open={showChatSidebar} onOpenChange={setShowChatSidebar} direction="left">
+        <DrawerContent className="w-80 bg-sidebar/95 backdrop-blur-sm border-r-2 border-sidebar-border">
           {/* Sidebar Header */}
-          <div className="p-4 border-b border-border">
+          <DrawerHeader className="p-4 border-b-2 border-sidebar-border bg-gradient-to-br from-sidebar to-sidebar-accent/30">
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
-                <Brain className="w-6 h-6 text-primary" />
-                <h2 className="text-lg font-semibold text-white">Mimir</h2>
+                <Brain className="w-6 h-6 text-primary drop-shadow-sm" />
+                <DrawerTitle className="text-lg font-bold text-sidebar-foreground">Mimir</DrawerTitle>
               </div>
               <button
                 onClick={() => setShowNewChatModal(true)}
-                className="p-2 text-primary hover:bg-primary/10 rounded-lg transition-colors"
+                className="p-2 text-primary hover:bg-primary/20 rounded-lg transition-all shadow-sm hover:shadow-md"
                 title="New Chat"
               >
                 <Plus className="w-5 h-5" />
@@ -655,53 +630,57 @@ export default function MimirApp() {
             </div>
 
             {/* Current Chat Info */}
-            <div className="bg-primary/10 border border-primary/30 p-3 rounded-lg">
-              <p className="text-xs font-medium text-white/60">Current Chat</p>
-              <p className="text-lg font-semibold text-primary truncate">{currentChat}</p>
-              <p className="text-xs text-white/60 mt-1">
+            <div className="bg-primary/15 border-2 border-primary/40 p-3 rounded-xl shadow-md">
+              <p className="text-xs font-medium text-sidebar-foreground/70">Current Chat</p>
+              <p className="text-lg font-bold text-primary truncate">{currentChat}</p>
+              <p className="text-xs text-sidebar-foreground/70 mt-1">
                 {history.length} message{history.length !== 1 ? "s" : ""}
               </p>
               {csvPath && (
-                <p className="text-xs text-primary/80 mt-1 truncate flex items-center gap-1" title={csvPath}>
+                <p className="text-xs text-primary/90 mt-1 truncate flex items-center gap-1" title={csvPath}>
                   <Database className="w-3 h-3" />
                   {fileName}
                 </p>
               )}
             </div>
-          </div>
+          </DrawerHeader>
 
           {/* Chat List */}
           <div className="flex-1 overflow-y-auto">
             {chats.map((chat) => (
               <div
                 key={chat.name}
-                className={`p-3 border-b border-border cursor-pointer hover:bg-secondary/50 transition-colors ${
-                  currentChat === chat.name ? "bg-primary/10 border-primary/30" : ""
+                className={`p-3 border-b border-sidebar-border cursor-pointer hover:bg-sidebar-accent transition-all ${
+                  currentChat === chat.name ? "bg-primary/15 border-l-4 border-l-primary shadow-inner" : ""
                 }`}
                 onClick={() => handleSwitchChat(chat.name)}
               >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2 flex-1 min-w-0">
-                    <MessageSquare className="w-4 h-4 text-white/60 flex-shrink-0" />
-                    <span className="font-medium text-white truncate">{chat.name}</span>
+                    <MessageSquare className="w-4 h-4 text-sidebar-foreground/60 flex-shrink-0" />
+                    <span className="font-medium text-sidebar-foreground truncate">{chat.name}</span>
                   </div>
                   <div className="flex items-center gap-1">
-                    <span className="text-xs text-white/60 bg-secondary px-2 py-1 rounded">{chat.message_count}</span>
+                    <span className="text-xs text-sidebar-foreground/60 bg-sidebar-accent px-2 py-1 rounded-md shadow-sm">
+                      {chat.message_count}
+                    </span>
                     <button
                       onClick={(e) => {
                         e.stopPropagation()
                         handleDeleteChat(chat.name)
                       }}
-                      className="p-1 text-white/60 hover:text-destructive transition-colors"
+                      className="p-1 text-sidebar-foreground/60 hover:text-destructive transition-colors"
                       title="Delete Chat"
                     >
                       <Trash2 className="w-3 h-3" />
                     </button>
                   </div>
                 </div>
-                <p className="text-xs text-white/60 mt-1">{new Date(chat.created_at).toLocaleDateString()}</p>
+                <p className="text-xs text-sidebar-foreground/60 mt-1">
+                  {new Date(chat.created_at).toLocaleDateString()}
+                </p>
                 {chat.csv_path && (
-                  <p className="text-xs text-primary/70 mt-1 truncate flex items-center gap-1" title={chat.csv_path}>
+                  <p className="text-xs text-primary/80 mt-1 truncate flex items-center gap-1" title={chat.csv_path}>
                     <Database className="w-3 h-3" />
                     {chat.csv_path.split(/[\\/]/).pop()}
                   </p>
@@ -711,89 +690,100 @@ export default function MimirApp() {
           </div>
 
           {/* Sidebar Footer */}
-          <div className="p-4 border-t border-border">
+          <DrawerFooter className="p-4 border-t-2 border-sidebar-border bg-gradient-to-br from-sidebar to-sidebar-accent/30">
             <button
               onClick={() => setShowChatSidebar(false)}
-              className="w-full p-2 text-white/60 hover:bg-secondary rounded-lg transition-colors flex items-center justify-center gap-2"
+              className="w-full p-2 text-sidebar-foreground/70 hover:bg-sidebar-accent rounded-lg transition-all flex items-center justify-center gap-2 shadow-sm hover:shadow-md"
             >
               <X className="w-4 h-4" />
               Hide Sidebar
             </button>
-          </div>
-        </div>
-      )}
+          </DrawerFooter>
+        </DrawerContent>
+      </Drawer>
 
       {showChatSidebar && (
-        <div className="fixed inset-0 bg-black/50 z-30 lg:hidden" onClick={() => setShowChatSidebar(false)} />
+        <div
+          className="fixed inset-0 bg-black/50 z-30 lg:hidden backdrop-blur-sm"
+          onClick={() => setShowChatSidebar(false)}
+        />
       )}
 
       {/* Main Content */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {/* Top Bar */}
-        <div className="bg-card/90 border-b border-border p-4 flex-shrink-0">
+        <div className="bg-card/95 backdrop-blur-sm border-b-2 border-border p-4 flex-shrink-0 shadow-md">
           <div className="flex items-center justify-between gap-4">
             <div className="flex items-center gap-3 min-w-0">
               {!showChatSidebar && (
                 <button
                   onClick={() => setShowChatSidebar(true)}
-                  className="p-2 text-white/60 hover:bg-secondary rounded-lg transition-colors flex-shrink-0"
+                  className="p-2 text-muted-foreground hover:bg-accent rounded-lg transition-all shadow-sm hover:shadow-md"
                   title="Show Chats"
                 >
                   <Menu className="w-5 h-5" />
                 </button>
               )}
-              <Brain className="w-7 h-7 text-primary flex-shrink-0" />
+              <Brain className="w-7 h-7 text-primary flex-shrink-0 drop-shadow-sm" />
               <div className="min-w-0">
-                <h1 className="text-xl font-bold text-white">Mimir</h1>
-                <p className="text-xs text-white/60 hidden sm:block">AI-Powered Data Analysis Assistant</p>
+                <h1 className="text-xl font-bold text-foreground">Mimir</h1>
+                <p className="text-xs text-muted-foreground hidden sm:block">AI-Powered Data Analysis Assistant</p>
               </div>
             </div>
-            <div className="text-sm text-white/60 flex items-center gap-2 sm:gap-4 min-w-0">
-              <span className="flex items-center gap-2 min-w-0">
-                <MessageSquare className="w-4 h-4 text-primary flex-shrink-0" />
-                <span className="font-semibold text-primary truncate hidden sm:inline">{currentChat}</span>
-              </span>
-              {csvPath && (
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+                className="p-2 text-muted-foreground hover:bg-accent rounded-lg transition-all shadow-sm hover:shadow-md"
+                title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+              >
+                {theme === "dark" ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
+              </button>
+              <div className="text-sm text-muted-foreground flex items-center gap-2 sm:gap-4 min-w-0">
                 <span className="flex items-center gap-2 min-w-0">
-                  <Database className="w-4 h-4 text-primary flex-shrink-0" />
-                  <span className="font-semibold text-primary truncate hidden md:inline">
-                    {fileName}
-                  </span>
+                  <MessageSquare className="w-4 h-4 text-primary flex-shrink-0" />
+                  <span className="font-semibold text-primary truncate hidden sm:inline">{currentChat}</span>
                 </span>
-              )}
+                {csvPath && (
+                  <span className="flex items-center gap-2 min-w-0">
+                    <Database className="w-4 h-4 text-primary flex-shrink-0" />
+                    <span className="font-semibold text-primary truncate hidden md:inline">{fileName}</span>
+                  </span>
+                )}
+              </div>
             </div>
           </div>
         </div>
 
         <div className="flex-1 overflow-y-auto">
           <div className="max-w-6xl mx-auto p-4 sm:p-6 w-full">
-            {/* Simplified File Upload Section */}
-            <header className="bg-card/80 border border-border rounded-lg p-4 sm:p-6 mb-6">
-              <div 
-                className={`flex flex-col items-center justify-center border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-all ${
-                  isDragging 
-                    ? "border-primary bg-primary/10 scale-105" 
-                    : "border-primary/30 bg-secondary/30 hover:bg-secondary/50 hover:border-primary/50"
+            {/* File Upload Section */}
+            <header className="bg-card/90 border-2 border-border rounded-xl p-4 sm:p-6 mb-6 shadow-lg">
+              <div
+                className={`flex flex-col items-center justify-center border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-all duration-300 ${
+                  isDragging
+                    ? "border-primary bg-primary/20 scale-[1.02] shadow-lg shadow-primary/20"
+                    : "border-primary/40 bg-gradient-to-br from-secondary/50 to-accent/30 hover:bg-accent/50 hover:border-primary/60 hover:shadow-md"
                 }`}
                 onDragOver={handleDragOver}
                 onDragLeave={handleDragLeave}
                 onDrop={handleDrop}
               >
-                <FileDown className="w-12 h-12 text-primary mb-4" />
-                <p className="text-white font-medium text-lg mb-2">Drop your CSV file here</p>
-                <p className="text-white/60 text-sm">or click to browse files</p>
-                <p className="text-white/40 text-xs mt-2">Supports .csv files</p>
+                <FileDown
+                  className={`w-12 h-12 text-primary mb-4 transition-transform ${isDragging ? "scale-110" : ""}`}
+                />
+                <p className="text-foreground font-semibold text-lg mb-2">Drop your CSV or Excel file here</p>
+                <p className="text-muted-foreground/70 text-xs mt-2">Supports .csv, .xls and .xlts files</p>
               </div>
 
-              {/* Current file info - simplified */}
+              {/* Current file info */}
               {fileName && (
-                <div className="mt-4 p-4 bg-primary/10 border border-primary/20 rounded-lg">
+                <div className="mt-4 p-4 bg-gradient-to-br from-primary/15 to-primary/5 border-2 border-primary/30 rounded-xl shadow-md">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-3">
                       <Database className="w-5 h-5 text-primary" />
                       <div>
-                        <p className="font-semibold text-primary">{fileName}</p>
-                        <p className="text-xs text-white/60 mt-1">Ready for analysis</p>
+                        <p className="font-bold text-primary">{fileName}</p>
+                        <p className="text-xs text-muted-foreground mt-1">Ready for analysis</p>
                       </div>
                     </div>
                   </div>
@@ -805,20 +795,20 @@ export default function MimirApp() {
             {renderInitialRecommendedPrompts()}
 
             {/* Query Input */}
-            <section className="bg-card/80 border border-border rounded-lg p-4 sm:p-6 mb-6 flex flex-col sm:flex-row gap-3">
+            <section className="bg-card/90 border-2 border-border rounded-xl p-4 sm:p-6 mb-6 flex flex-col sm:flex-row gap-3 shadow-lg">
               <input
                 type="text"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="Ask a question about your data..."
-                className="flex-1 px-4 py-3 bg-secondary border border-border rounded-lg focus:ring-2 focus:ring-primary text-base sm:text-lg text-white placeholder:text-white/40 min-w-0"
+                className="flex-1 px-4 py-3 bg-input border-2 border-border rounded-lg focus:ring-2 focus:ring-primary focus:border-primary text-base sm:text-lg text-foreground placeholder:text-muted-foreground min-w-0 transition-all shadow-sm"
                 disabled={loading}
                 onKeyDown={(e) => e.key === "Enter" && handleAnalyze()}
               />
               <button
                 onClick={handleAnalyze}
                 disabled={loading || !query.trim() || !csvPath}
-                className="px-6 sm:px-8 py-3 bg-primary text-white rounded-lg hover:bg-primary/90 disabled:opacity-50 flex items-center justify-center gap-2 font-semibold transition-all whitespace-nowrap"
+                className="px-6 sm:px-8 py-3 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 font-bold transition-all whitespace-nowrap shadow-md hover:shadow-lg hover:scale-[1.02] active:scale-[0.98]"
               >
                 {loading ? (
                   <>
@@ -832,21 +822,21 @@ export default function MimirApp() {
               </button>
             </section>
 
-            {/* History / Results - Now with all sections displayed one below the other */}
-            <section 
-              ref={historyContainerRef}
-              className="space-y-4 max-h-[calc(100vh-400px)] overflow-y-auto pr-2"
-            >
+            {/* History / Results */}
+            <section ref={historyContainerRef} className="space-y-4 max-h-[calc(100vh-400px)] overflow-y-auto pr-2">
               {history.map((item) => (
-                <article key={item.id} className="bg-card/80 border border-border rounded-lg overflow-hidden">
-                  <header className="bg-primary/20 border-b border-primary/30 p-4">
-                    <p className="text-white font-semibold break-words">{item.query}</p>
-                    <time className="text-white/60 text-sm mt-1">{item.timestamp}</time>
+                <article
+                  key={item.id}
+                  className="bg-card/90 border-2 border-border rounded-xl overflow-hidden shadow-lg hover:shadow-xl transition-shadow"
+                >
+                  <header className="bg-gradient-to-r from-primary/20 to-primary/10 border-b-2 border-primary/30 p-4">
+                    <p className="text-foreground font-bold break-words">{item.query}</p>
+                    <time className="text-muted-foreground text-sm mt-1">{item.timestamp}</time>
                   </header>
-                  
+
                   {item.response.error ? (
                     <div className="p-4 bg-destructive/10 border-l-4 border-destructive">
-                      <p className="text-destructive font-semibold">Error:</p>
+                      <p className="text-destructive font-bold">Error:</p>
                       <p className="text-destructive/80 text-sm mt-1 break-words">{item.response.error}</p>
                     </div>
                   ) : (
@@ -855,10 +845,10 @@ export default function MimirApp() {
                       <div className="space-y-4">
                         <div className="flex items-center gap-2">
                           <BarChart3 className="w-5 h-5 text-primary" />
-                          <h3 className="font-semibold text-white">Results</h3>
+                          <h3 className="font-bold text-foreground">Results</h3>
                         </div>
-                        <div className="bg-secondary/50 border border-border p-4 rounded-lg">
-                          <pre className="text-sm font-mono text-white whitespace-pre-wrap break-words">
+                        <div className="bg-secondary/50 border-2 border-border p-4 rounded-lg shadow-inner">
+                          <pre className="text-sm font-mono text-foreground whitespace-pre-wrap break-words">
                             {item.response.result}
                           </pre>
                         </div>
@@ -869,18 +859,16 @@ export default function MimirApp() {
                       <div className="space-y-4">
                         <div className="flex items-center gap-2">
                           <FileText className="w-5 h-5 text-primary" />
-                          <h3 className="font-semibold text-white">Summary</h3>
+                          <h3 className="font-bold text-foreground">Summary</h3>
                         </div>
-                        <p className="text-white leading-relaxed break-words bg-secondary/30 border border-border p-4 rounded-lg">
+                        <p className="text-foreground leading-relaxed break-words bg-gradient-to-br from-secondary/40 to-accent/20 border-2 border-border p-4 rounded-lg shadow-sm">
                           {item.response.summary}
                         </p>
                       </div>
 
                       {/* Mimir Recommends Section */}
                       {item.response.mimir_recommends && item.response.mimir_recommends.length > 0 && (
-                        <div className="space-y-4">
-                          {renderMimirRecommends(item.response.mimir_recommends)}
-                        </div>
+                        <div className="space-y-4">{renderMimirRecommends(item.response.mimir_recommends)}</div>
                       )}
                     </div>
                   )}
@@ -889,7 +877,6 @@ export default function MimirApp() {
                   {renderItemRecommendedPrompts(item)}
                 </article>
               ))}
-              {/* Invisible element to scroll to */}
               <div ref={messagesEndRef} />
             </section>
           </div>
@@ -898,28 +885,28 @@ export default function MimirApp() {
 
       {/* New Chat Modal */}
       {showNewChatModal && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="bg-card border border-border rounded-lg p-6 w-full max-w-md">
-            <h3 className="text-lg font-semibold mb-4 text-white">Create New Chat</h3>
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-md flex items-center justify-center z-50 p-4">
+          <div className="bg-card border-2 border-border rounded-xl p-6 w-full max-w-md shadow-2xl">
+            <h3 className="text-lg font-bold mb-4 text-foreground">Create New Chat</h3>
             <input
               type="text"
               value={newChatName}
               onChange={(e) => setNewChatName(e.target.value)}
               placeholder="Enter chat name..."
-              className="w-full px-3 py-2 bg-secondary border border-border rounded-lg focus:ring-2 focus:ring-primary mb-4 text-white placeholder:text-white/40"
+              className="w-full px-3 py-2 bg-input border-2 border-border rounded-lg focus:ring-2 focus:ring-primary focus:border-primary mb-4 text-foreground placeholder:text-muted-foreground transition-all shadow-sm"
               onKeyDown={(e) => e.key === "Enter" && handleCreateChat()}
             />
             <div className="flex gap-2 justify-end">
               <button
                 onClick={() => setShowNewChatModal(false)}
-                className="px-4 py-2 text-white/60 hover:bg-secondary rounded-lg transition-colors"
+                className="px-4 py-2 text-muted-foreground hover:bg-accent rounded-lg transition-all shadow-sm hover:shadow-md"
               >
                 Cancel
               </button>
               <button
                 onClick={handleCreateChat}
                 disabled={!newChatName.trim()}
-                className="px-4 py-2 bg-primary text-white rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors font-semibold"
+                className="px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-all font-bold shadow-md hover:shadow-lg"
               >
                 Create
               </button>
