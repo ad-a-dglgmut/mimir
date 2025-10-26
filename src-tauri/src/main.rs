@@ -449,21 +449,57 @@ async fn analyze_query(
 
 #[tauri::command]
 async fn load_csv_info(csv_path: String) -> Result<Vec<Vec<String>>, String> {
-    let output = Command::new("python")
-        .arg("-c")
-        .arg(format!(r#"
+    use std::path::Path;
+    use std::process::Command;
+
+    // Determine file extension (case-insensitive)
+    let ext = Path::new(&csv_path)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    // Choose how to load based on extension
+    let read_cmd = match ext.as_str() {
+        "csv" => format!("pd.read_csv(r'{}')", csv_path),
+        "xlsx" | "xls" => format!("pd.read_excel(r'{}')", csv_path),
+        _ => return Err(format!("Unsupported file type: .{}", ext)),
+    };
+
+    // Python code that dynamically reads CSV or Excel
+    let python_code = format!(r#"
 import pandas as pd
 import json
-df = pd.read_csv(r'{}')
-# Convert all values to strings
-data = df.head(5).astype(str).values.tolist()
-print(json.dumps(data))
-"#, csv_path))
-        .output()
-        .map_err(|e| format!("Failed to read CSV: {}", e))?;
+import sys
 
+try:
+    df = {}
+    data = df.head(5).astype(str).values.tolist()
+    print(json.dumps(data))
+except Exception as e:
+    sys.stderr.write(str(e))
+    sys.exit(1)
+"#, read_cmd);
+
+    // Run Python
+    let output = Command::new("python")
+        .arg("-c")
+        .arg(python_code)
+        .output()
+        .map_err(|e| format!("Failed to run Python: {}", e))?;
+
+    // Check for Python-side errors
+    if !output.status.success() {
+        return Err(format!(
+            "Python error: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    // Parse JSON back into Vec<Vec<String>>
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    serde_json::from_str(&stdout).map_err(|e| format!("Failed to parse CSV JSON: {}", e))
+    serde_json::from_str(&stdout)
+        .map_err(|e| format!("Failed to parse JSON output: {}", e))
 }
 
 fn parse_python_output(stdout: &str, stderr: &str) -> AnalysisResponse {

@@ -6,6 +6,17 @@ import numpy as np
 from groq import Groq
 import sys
 
+
+def check_file_type(file_path):
+    ext = os.path.splitext(file_path)[1].lower()
+
+    if ext == '.csv':
+        return 'csv'
+    elif ext in ['.xlsx', '.xls']:
+        return 'excel'
+    else:
+        return 'unknown'
+
 # =====================================================
 # 1. CSV loader and cleaner
 # =====================================================
@@ -22,13 +33,18 @@ def load_clean_csv(csv_path):
     for enc in encodings:
         for sep in separators:
             try:
-                df = pd.read_csv(
-                    csv_path,
-                    sep=sep,
-                    encoding=enc,
-                    engine="python",
-                    on_bad_lines="skip"
-                )
+                if check_file_type(csv_path) == 'csv':
+                    df = pd.read_csv(
+                        csv_path,
+                        sep=sep,
+                        encoding=enc,
+                        engine="python",
+                        on_bad_lines="skip"
+                    )
+                elif check_file_type(csv_path) == 'excel':
+                    df = pd.read_excel(
+                        csv_path
+                    )
                 if df.shape[1] > 1 and df.shape[0] > 0:
                     print(f"✅ Loaded successfully with sep='{sep}' encoding='{enc}' → {df.shape}")
                     loaded = True
