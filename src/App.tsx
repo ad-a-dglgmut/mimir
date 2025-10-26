@@ -3,13 +3,11 @@
 import type React from "react"
 
 import { useState, useEffect, useRef } from "react"
-import Papa from "papaparse"
 import * as echarts from "echarts"
 import {
   FileText,
   BarChart3,
   Loader2,
-  Upload,
   Database,
   Plus,
   MessageSquare,
@@ -52,7 +50,6 @@ interface HistoryItem {
   response: AnalysisResponse
   timestamp: string
   showRecommendedPrompts?: boolean
-  activeTab?: TabType // Individual tab state for each history item
 }
 
 interface ChatInfo {
@@ -62,19 +59,14 @@ interface ChatInfo {
   csv_path: any
 }
 
-type TabType = "result" | "summary" | "mimir"
-
 // --- Component ---
 export default function MimirApp() {
   const [csvPath, setCsvPath] = useState<string>("")
-  const [csvInfo, setCsvInfo] = useState<string>("")
-  const [csvPreview, setCsvPreview] = useState<string[][]>([])
   const [fileName, setFileName] = useState<string>("")
   const [query, setQuery] = useState<string>("")
   const [loading, setLoading] = useState<boolean>(false)
   const [history, setHistory] = useState<HistoryItem[]>([])
-  const [activeTab, setActiveTab] = useState<TabType>("result") // Fallback for new items
-  const [isDragging, setIsDragging] = useState<boolean>(false) // Add this missing state
+  const [isDragging, setIsDragging] = useState<boolean>(false)
 
   // Chat management state
   const [chats, setChats] = useState<ChatInfo[]>([])
@@ -124,30 +116,27 @@ export default function MimirApp() {
       const reversedHistory = history.reverse().map((item) => ({
         ...item,
         showRecommendedPrompts: item.showRecommendedPrompts ?? true,
-        activeTab: item.activeTab ?? "result", // Set default tab for each item
       }))
       setHistory(reversedHistory)
 
       const csvPath = await invoke<string | null>("get_csv_path")
       if (csvPath) {
         setCsvPath(csvPath)
-        await loadCsvInfo(csvPath)
-        await previewCsv(csvPath)
+        setFileName(csvPath.split(/[\\/]/).pop() || "")
       } else {
-        // Clear CSV preview when switching to a chat without CSV
-        clearCsvPreview()
+        // Clear CSV info when switching to a chat without CSV
+        clearCsvInfo()
       }
     } catch (err) {
       console.error("Failed to load current chat:", err)
-      clearCsvPreview()
+      clearCsvInfo()
     }
   }
 
-  // --- Clear CSV preview ---
-  const clearCsvPreview = () => {
-    setCsvPreview([])
+  // --- Clear CSV info ---
+  const clearCsvInfo = () => {
     setFileName("")
-    setCsvInfo("")
+    setCsvPath("")
   }
 
   // --- Load chat list ---
@@ -181,7 +170,7 @@ export default function MimirApp() {
       await loadChatList()
       await loadCurrentChatName()
       await loadCurrentChat()
-      clearCsvPreview() // Clear CSV preview for new chat
+      clearCsvInfo() // Clear CSV info for new chat
     } catch (err) {
       alert(`Failed to create chat: ${err}`)
     }
@@ -220,27 +209,12 @@ export default function MimirApp() {
     }
   }
 
-  // --- Load CSV info from Rust backend ---
-  const loadCsvInfo = async (path?: string) => {
-    if (!path && !csvPath) return
-    setLoading(true)
-    try {
-      const info = await invoke<string>("load_csv_info", { csvPath: path || csvPath })
-      setCsvInfo(info)
-    } catch (err) {
-      setCsvInfo(`Error: ${err}`)
-    } finally {
-      setLoading(false)
-    }
-  }
-
   // --- Set CSV path for current chat ---
   const setCsvPathForChat = async (path: string) => {
     try {
       await invoke("set_csv_path", { csvPath: path })
       setCsvPath(path)
-      await loadCsvInfo(path)
-      await previewCsv(path)
+      setFileName(path.split(/[\\/]/).pop() || "")
     } catch (err) {
       console.error("Failed to set CSV path:", err)
     }
@@ -293,7 +267,6 @@ export default function MimirApp() {
         },
         timestamp: new Date().toLocaleTimeString(),
         showRecommendedPrompts: true,
-        activeTab: "result",
       }
       // Add new error to the beginning of the array
       setHistory((prev) => [errorItem, ...prev])
@@ -319,29 +292,6 @@ export default function MimirApp() {
         item.id === itemId ? { ...item, showRecommendedPrompts: !item.showRecommendedPrompts } : item,
       ),
     )
-  }
-
-  // --- Change tab for a specific history item ---
-  const handleTabChange = (itemId: number, tab: TabType) => {
-    setHistory((prev) =>
-      prev.map((item) =>
-        item.id === itemId ? { ...item, activeTab: tab } : item,
-      ),
-    )
-  }
-
-  // --- Handle CSV preview ---
-  const previewCsv = async (filePath: string) => {
-    try {
-      const response = await fetch(`file://${filePath}`)
-      const text = await response.text()
-      const parsed = Papa.parse<string[]>(text, { skipEmptyLines: true })
-      setCsvPreview(parsed.data.slice(0, 10))
-      setFileName(filePath.split(/[\\/]/).pop() || "")
-    } catch (err) {
-      console.error("Failed to preview CSV:", err)
-      setCsvPreview([])
-    }
   }
 
   // --- Enhanced drag and drop handlers ---
@@ -401,20 +351,6 @@ export default function MimirApp() {
       if (cleanup) cleanup()
     }
   }, [])
-
-  // --- Tab button renderer for individual history items ---
-  const renderTabButton = (itemId: number, tab: TabType, icon: React.ReactNode, label: string, isActive: boolean) => (
-    <button
-      onClick={() => handleTabChange(itemId, tab)}
-      className={`px-6 py-3 flex items-center gap-2 transition-all relative ${
-        isActive ? "text-primary" : "text-white/60 hover:text-white"
-      }`}
-    >
-      {icon}
-      {label}
-      {isActive && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary" />}
-    </button>
-  )
 
   // --- Enhanced Chart renderer with ECharts ---
   const ChartRenderer = ({ chartJson }: { chartJson?: string }) => {
@@ -680,7 +616,7 @@ export default function MimirApp() {
     if (!recommendations || recommendations.length === 0) return null
 
     return (
-      <div className="bg-card/80 border border-primary/30 rounded-lg p-4 sm:p-6">
+      <div className="bg-card/80 border border-primary/30 rounded-lg p-6">
         <div className="flex items-center gap-2 mb-4">
           <Brain className="w-5 h-5 text-primary" />
           <h3 className="font-semibold text-white">Mimir's Insights</h3>
@@ -728,7 +664,7 @@ export default function MimirApp() {
               {csvPath && (
                 <p className="text-xs text-primary/80 mt-1 truncate flex items-center gap-1" title={csvPath}>
                   <Database className="w-3 h-3" />
-                  {fileName || csvPath.split(/[\\/]/).pop()}
+                  {fileName}
                 </p>
               )}
             </div>
@@ -821,7 +757,7 @@ export default function MimirApp() {
                 <span className="flex items-center gap-2 min-w-0">
                   <Database className="w-4 h-4 text-primary flex-shrink-0" />
                   <span className="font-semibold text-primary truncate hidden md:inline">
-                    {fileName || csvPath.split(/[\\/]/).pop()}
+                    {fileName}
                   </span>
                 </span>
               )}
@@ -831,7 +767,7 @@ export default function MimirApp() {
 
         <div className="flex-1 overflow-y-auto">
           <div className="max-w-6xl mx-auto p-4 sm:p-6 w-full">
-            {/* Enhanced File Upload Section */}
+            {/* Simplified File Upload Section */}
             <header className="bg-card/80 border border-border rounded-lg p-4 sm:p-6 mb-6">
               <div 
                 className={`flex flex-col items-center justify-center border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-all ${
@@ -849,90 +785,18 @@ export default function MimirApp() {
                 <p className="text-white/40 text-xs mt-2">Supports .csv files</p>
               </div>
 
-              {/* Current file info */}
+              {/* Current file info - simplified */}
               {fileName && (
-                <div className="mt-4 p-3 bg-primary/10 border border-primary/20 rounded-lg">
+                <div className="mt-4 p-4 bg-primary/10 border border-primary/20 rounded-lg">
                   <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <Database className="w-4 h-4 text-primary" />
-                      <span className="font-semibold text-primary truncate">{fileName}</span>
-                    </div>
-                    <div className="text-xs text-white/60">
-                      Ready for analysis
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* CSV Info */}
-              {csvInfo && (
-                <pre className="mt-4 p-4 bg-secondary/50 border border-border rounded-lg text-sm overflow-x-auto text-white font-mono max-h-40 overflow-y-auto">
-                  {csvInfo}
-                </pre>
-              )}
-
-              {/* Enhanced CSV Preview */}
-              {csvPreview.length > 0 && (
-                <div className="mt-4 border border-border rounded-lg overflow-hidden">
-                  <div className="flex items-center justify-between p-3 bg-secondary border-b border-border">
-                    <div className="flex items-center gap-2">
-                      <Database className="w-4 h-4 text-primary" />
-                      <span className="text-sm font-medium text-white">CSV Preview (first 10 rows)</span>
-                    </div>
-                    <div className="text-xs text-white/60 bg-primary/20 px-2 py-1 rounded">
-                      {csvPreview.length - 1} rows × {csvPreview[0]?.length || 0} columns
+                    <div className="flex items-center gap-3">
+                      <Database className="w-5 h-5 text-primary" />
+                      <div>
+                        <p className="font-semibold text-primary">{fileName}</p>
+                        <p className="text-xs text-white/60 mt-1">Ready for analysis</p>
+                      </div>
                     </div>
                   </div>
-                  <div className="overflow-x-auto max-h-80">
-                    <table className="w-full text-sm">
-                      <thead className="bg-secondary/50 sticky top-0">
-                        <tr>
-                          {csvPreview[0]?.map((col, idx) => (
-                            <th
-                              key={idx}
-                              className="px-4 py-3 text-left font-semibold text-primary border-r border-border whitespace-nowrap min-w-32"
-                            >
-                              <div className="flex items-center gap-2">
-                                <span className="truncate" title={col}>
-                                  {col}
-                                </span>
-                                <span className="text-xs text-white/40 bg-secondary px-1 rounded">
-                                  {idx + 1}
-                                </span>
-                              </div>
-                            </th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {csvPreview.slice(1).map((row, i) => (
-                          <tr 
-                            key={i} 
-                            className="border-b border-border hover:bg-secondary/20 transition-colors group"
-                          >
-                            {row.map((cell, j) => (
-                              <td 
-                                key={j} 
-                                className="px-4 py-2 border-r border-border whitespace-nowrap text-white group-hover:bg-secondary/10 transition-colors"
-                                title={cell}
-                              >
-                                <div className="truncate max-w-xs">
-                                  {cell}
-                                </div>
-                              </td>
-                            ))}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                  {csvPreview.length > 6 && (
-                    <div className="p-2 bg-secondary/30 border-t border-border text-center">
-                      <p className="text-xs text-white/60">
-                        Scroll horizontally to see more columns • Showing first 10 rows
-                      </p>
-                    </div>
-                  )}
                 </div>
               )}
             </header>
@@ -968,66 +832,63 @@ export default function MimirApp() {
               </button>
             </section>
 
-            {/* History / Results - Now with proper scrollbar and individual tab states */}
+            {/* History / Results - Now with all sections displayed one below the other */}
             <section 
               ref={historyContainerRef}
               className="space-y-4 max-h-[calc(100vh-400px)] overflow-y-auto pr-2"
             >
-              {history.map((item) => {
-                const itemActiveTab = item.activeTab || "result"
-                
-                return (
-                  <article key={item.id} className="bg-card/80 border border-border rounded-lg overflow-hidden">
-                    <header className="bg-primary/20 border-b border-primary/30 p-4">
-                      <p className="text-white font-semibold break-words">{item.query}</p>
-                      <time className="text-white/60 text-sm mt-1">{item.timestamp}</time>
-                    </header>
-                    {item.response.error ? (
-                      <div className="p-4 bg-destructive/10 border-l-4 border-destructive">
-                        <p className="text-destructive font-semibold">Error:</p>
-                        <p className="text-destructive/80 text-sm mt-1 break-words">{item.response.error}</p>
-                      </div>
-                    ) : (
-                      <>
-                        <nav className="flex border-b border-border bg-secondary/30 overflow-x-auto">
-                          {renderTabButton(item.id, "result", <BarChart3 className="w-4 h-4" />, "Results", itemActiveTab === "result")}
-                          {renderTabButton(item.id, "summary", <FileText className="w-4 h-4" />, "Summary", itemActiveTab === "summary")}
-                          {renderTabButton(item.id, "mimir", <Brain className="w-4 h-4" />, "Mimir Recommends", itemActiveTab === "mimir")}
-                        </nav>
-                        <div className="p-4 sm:p-6">
-                          {itemActiveTab === "result" && (
-                            <div className="space-y-4">
-                              <div className="bg-secondary/50 border border-border p-4 rounded-lg">
-                                <pre className="text-sm font-mono text-white whitespace-pre-wrap break-words">
-                                  {item.response.result}
-                                </pre>
-                              </div>
-                              <ChartRenderer chartJson={item.response.chart} />
-                            </div>
-                          )}
-                          {itemActiveTab === "summary" && (
-                            <p className="text-white leading-relaxed break-words">{item.response.summary}</p>
-                          )}
-                          {itemActiveTab === "mimir" && (
-                            <div className="space-y-6">
-                              {renderMimirRecommends(item.response.mimir_recommends)}
-                              {(!item.response.mimir_recommends || item.response.mimir_recommends.length === 0) && (
-                                <div className="text-center py-8 text-white/60">
-                                  <Brain className="w-12 h-12 mx-auto mb-3 text-primary/50" />
-                                  <p>No additional insights available for this analysis.</p>
-                                </div>
-                              )}
-                            </div>
-                          )}
+              {history.map((item) => (
+                <article key={item.id} className="bg-card/80 border border-border rounded-lg overflow-hidden">
+                  <header className="bg-primary/20 border-b border-primary/30 p-4">
+                    <p className="text-white font-semibold break-words">{item.query}</p>
+                    <time className="text-white/60 text-sm mt-1">{item.timestamp}</time>
+                  </header>
+                  
+                  {item.response.error ? (
+                    <div className="p-4 bg-destructive/10 border-l-4 border-destructive">
+                      <p className="text-destructive font-semibold">Error:</p>
+                      <p className="text-destructive/80 text-sm mt-1 break-words">{item.response.error}</p>
+                    </div>
+                  ) : (
+                    <div className="p-4 sm:p-6 space-y-6">
+                      {/* Results Section */}
+                      <div className="space-y-4">
+                        <div className="flex items-center gap-2">
+                          <BarChart3 className="w-5 h-5 text-primary" />
+                          <h3 className="font-semibold text-white">Results</h3>
                         </div>
-                      </>
-                    )}
+                        <div className="bg-secondary/50 border border-border p-4 rounded-lg">
+                          <pre className="text-sm font-mono text-white whitespace-pre-wrap break-words">
+                            {item.response.result}
+                          </pre>
+                        </div>
+                        <ChartRenderer chartJson={item.response.chart} />
+                      </div>
 
-                    {/* Recommended prompts for this specific item */}
-                    {renderItemRecommendedPrompts(item)}
-                  </article>
-                )
-              })}
+                      {/* Summary Section */}
+                      <div className="space-y-4">
+                        <div className="flex items-center gap-2">
+                          <FileText className="w-5 h-5 text-primary" />
+                          <h3 className="font-semibold text-white">Summary</h3>
+                        </div>
+                        <p className="text-white leading-relaxed break-words bg-secondary/30 border border-border p-4 rounded-lg">
+                          {item.response.summary}
+                        </p>
+                      </div>
+
+                      {/* Mimir Recommends Section */}
+                      {item.response.mimir_recommends && item.response.mimir_recommends.length > 0 && (
+                        <div className="space-y-4">
+                          {renderMimirRecommends(item.response.mimir_recommends)}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Recommended prompts for this specific item */}
+                  {renderItemRecommendedPrompts(item)}
+                </article>
+              ))}
               {/* Invisible element to scroll to */}
               <div ref={messagesEndRef} />
             </section>
