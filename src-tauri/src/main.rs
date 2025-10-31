@@ -340,15 +340,19 @@ async fn save_history(
 // ========== PYTHON SERVICE COMMANDS ==========
 
 #[tauri::command]
-async fn start_python_service(state: State<'_, PythonProcess>) -> Result<String, String> {
+async fn start_python_service(app_handle: tauri::AppHandle, state: State<'_, PythonProcess>) -> Result<String, String> {
     let mut process_lock = state.process.lock().unwrap();
     
     if process_lock.is_some() {
         return Ok("Python service already running".to_string());
     }
 
+    // Get the path to the Python analyzer script
+    let analyzer_path = get_python_analyzer_path(&app_handle)
+        .map_err(|e| format!("Failed to get Python analyzer path: {}", e))?;
+
     let child = Command::new("python")
-        .arg("./python/analyzer.py")
+        .arg(&analyzer_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -382,11 +386,9 @@ async fn analyze_query(
 ) -> Result<AnalysisResponse, String> {
     log_to_frontend(&app_handle, &format!("Analyzing: {}", query));
 
-    let python_bin = if cfg!(target_os = "windows") {
-        "./python/venv/Scripts/python.exe"
-    } else {
-        "./python/venv/bin/python"
-    };
+    // Get the path to the Python executable and analyzer script
+    let (python_bin, analyzer_path) = get_python_paths(&app_handle)
+        .map_err(|e| format!("Failed to get Python paths: {}", e))?;
 
     // Get current chat and its history
     let current_chat = state.current_chat.lock().unwrap();
@@ -402,8 +404,8 @@ async fn analyze_query(
         .map_err(|e| format!("Failed to serialize history: {}", e))?;
 
     // Pass the CSV path, query, AND history to Python
-    let mut command = Command::new(python_bin);
-    command.arg("./python/analyzer.py");
+    let mut command = Command::new(&python_bin);
+    command.arg(&analyzer_path);
     command.arg(csv_path.clone());
     command.arg(query.clone());
     command.arg(history_json);
@@ -448,9 +450,13 @@ async fn analyze_query(
 }
 
 #[tauri::command]
-async fn load_csv_info(csv_path: String) -> Result<Vec<Vec<String>>, String> {
+async fn load_csv_info(app_handle: tauri::AppHandle, csv_path: String) -> Result<Vec<Vec<String>>, String> {
     use std::path::Path;
     use std::process::Command;
+
+    // Get the path to the Python executable
+    let (python_bin, _) = get_python_paths(&app_handle)
+        .map_err(|e| format!("Failed to get Python paths: {}", e))?;
 
     // Determine file extension (case-insensitive)
     let ext = Path::new(&csv_path)
@@ -482,7 +488,7 @@ except Exception as e:
 "#, read_cmd);
 
     // Run Python
-    let output = Command::new("python")
+    let output = Command::new(&python_bin)
         .arg("-c")
         .arg(python_code)
         .output()
@@ -500,6 +506,58 @@ except Exception as e:
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     serde_json::from_str(&stdout)
         .map_err(|e| format!("Failed to parse JSON output: {}", e))
+}
+
+// Helper function to get Python paths
+fn get_python_paths(app_handle: &AppHandle) -> Result<(String, String), String> {
+    let resource_dir = app_handle.path()
+        .resource_dir()
+        .map_err(|e| format!("Failed to get resource directory: {}", e))?;
+
+    // In development, the Python files are in src-tauri/python/
+    // In production, they're in the resources directory
+    let python_dir = resource_dir.join("python");
+    
+    if !python_dir.exists() {
+        return Err("Python directory not found in resources".to_string());
+    }
+
+    let python_bin = if cfg!(target_os = "windows") {
+        python_dir.join("venv/Scripts/python.exe")
+    } else {
+        python_dir.join("venv/bin/python")
+    };
+
+    let analyzer_path = python_dir.join("analyzer.py");
+
+    if !python_bin.exists() {
+        return Err(format!("Python executable not found at: {:?}", python_bin));
+    }
+
+    if !analyzer_path.exists() {
+        return Err(format!("Analyzer script not found at: {:?}", analyzer_path));
+    }
+
+    Ok((
+        python_bin.to_string_lossy().to_string(),
+        analyzer_path.to_string_lossy().to_string()
+    ))
+}
+
+// Helper function to get just the analyzer path
+fn get_python_analyzer_path(app_handle: &AppHandle) -> Result<String, String> {
+    let resource_dir = app_handle.path()
+        .resource_dir()
+        .map_err(|e| format!("Failed to get resource directory: {}", e))?;
+
+    let python_dir = resource_dir.join("python");
+    let analyzer_path = python_dir.join("analyzer.py");
+
+    if !analyzer_path.exists() {
+        return Err(format!("Analyzer script not found at: {:?}", analyzer_path));
+    }
+
+    Ok(analyzer_path.to_string_lossy().to_string())
 }
 
 fn parse_python_output(stdout: &str, stderr: &str) -> AnalysisResponse {
