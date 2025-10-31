@@ -523,7 +523,7 @@ fn get_python_paths(app_handle: &AppHandle) -> Result<(String, String), String> 
     }
 
     let python_bin = if cfg!(target_os = "windows") {
-        python_dir.join("venv/Scripts/python.exe")
+        python_dir.join("venv/bin/python.exe")
     } else {
         python_dir.join("venv/bin/python")
     };
