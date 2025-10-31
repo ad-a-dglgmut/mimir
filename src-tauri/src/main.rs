@@ -6,6 +6,7 @@ use std::sync::Mutex;
 use std::collections::HashMap;
 use tauri::{AppHandle, State, Emitter, Manager};
 use serde::{Deserialize, Serialize};
+use dirs;
 
 fn log_to_frontend(app_handle: &AppHandle, message: &str) {
     if let Some(window) = app_handle.get_webview_window("main") {
@@ -522,7 +523,8 @@ fn get_python_paths(app_handle: &AppHandle) -> Result<(String, String), String> 
         return Err("Python directory not found in resources".to_string());
     }
 
-    let python_bin = if cfg!(target_os = "windows") {
+    // First try to find Python in the virtual environment
+    let venv_python_bin = if cfg!(target_os = "windows") {
         python_dir.join("venv/bin/python.exe")
     } else {
         python_dir.join("venv/bin/python")
@@ -530,18 +532,99 @@ fn get_python_paths(app_handle: &AppHandle) -> Result<(String, String), String> 
 
     let analyzer_path = python_dir.join("analyzer.py");
 
-    if !python_bin.exists() {
-        return Err(format!("Python executable not found at: {:?}", python_bin));
-    }
-
     if !analyzer_path.exists() {
         return Err(format!("Analyzer script not found at: {:?}", analyzer_path));
     }
 
-    Ok((
-        python_bin.to_string_lossy().to_string(),
-        analyzer_path.to_string_lossy().to_string()
-    ))
+    // Check if venv Python exists, if not fall back to system Python
+    let python_bin = if venv_python_bin.exists() {
+        venv_python_bin.to_string_lossy().to_string()
+    } else {
+        println!("Virtual environment Python not found at {:?}, falling back to system Python", venv_python_bin);
+        
+        // Try to find system Python
+        if cfg!(target_os = "windows") {
+            // On Windows, try common Python locations and commands
+            find_system_python().map_err(|e| format!("Failed to find system Python: {}", e))?
+        } else {
+            // On Unix-like systems, try 'python3' or 'python'
+            "python3".to_string()
+        }
+    };
+
+    // Verify the Python command works
+    if !verify_python_command(&python_bin) {
+        return Err(format!("Python command '{}' is not working. Please ensure Python is installed and in your PATH.", python_bin));
+    }
+
+    Ok((python_bin, analyzer_path.to_string_lossy().to_string()))
+}
+
+// Helper function to find system Python on Windows
+fn find_system_python() -> Result<String, String> {
+    // Try different Python commands in order of preference
+    let commands = ["python", "python3", "py"];
+    
+    for cmd in commands.iter() {
+        if verify_python_command(cmd) {
+            println!("Found working Python command: {}", cmd);
+            return Ok(cmd.to_string());
+        }
+    }
+    
+    // If no command works, try to find Python in common installation directories
+    if let Some(install_path) = find_python_in_program_files() {
+        println!("Found Python installation at: {}", install_path);
+        return Ok(install_path);
+    }
+    
+    Err("Could not find a working Python installation. Please install Python and ensure it's in your PATH.".to_string())
+}
+
+// Helper function to verify if a Python command works
+fn verify_python_command(command: &str) -> bool {
+    let output = Command::new(command)
+        .arg("--version")
+        .output();
+    
+    match output {
+        Ok(output) => output.status.success(),
+        Err(_) => false,
+    }
+}
+
+// Helper function to find Python in Windows Program Files directories
+fn find_python_in_program_files() -> Option<String> {
+    let possible_paths = [
+        r"C:\Program Files\Python311\python.exe",
+        r"C:\Program Files\Python310\python.exe",
+        r"C:\Program Files\Python39\python.exe",
+        r"C:\Program Files\Python38\python.exe",
+        r"C:\Program Files (x86)\Python311\python.exe",
+        r"C:\Program Files (x86)\Python310\python.exe",
+        r"C:\Program Files (x86)\Python39\python.exe",
+        r"C:\Program Files (x86)\Python38\python.exe",
+        r"C:\Users\*\AppData\Local\Programs\Python\Python311\python.exe",
+        r"C:\Users\*\AppData\Local\Programs\Python\Python310\python.exe",
+        r"C:\Users\*\AppData\Local\Programs\Python\Python39\python.exe",
+        r"C:\Users\*\AppData\Local\Programs\Python\Python38\python.exe",
+    ];
+
+    for path_pattern in possible_paths.iter() {
+        // Handle paths with wildcards for user directories
+        if path_pattern.contains('*') {
+            if let Some(home_dir) = dirs::home_dir() {
+                let path = path_pattern.replace('*', &home_dir.to_string_lossy());
+                if std::path::Path::new(&path).exists() {
+                    return Some(path);
+                }
+            }
+        } else if std::path::Path::new(path_pattern).exists() {
+            return Some(path_pattern.to_string());
+        }
+    }
+
+    None
 }
 
 // Helper function to get just the analyzer path
