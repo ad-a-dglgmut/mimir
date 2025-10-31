@@ -224,50 +224,57 @@ export default function MimirApp() {
     }
   }, [])
 
-  const handleAnalyze = async () => {
-    if (!query.trim()) return
-    if (!csvPath) {
-      alert("Please load a CSV file first")
-      return
-    }
-
-    setLoading(true)
-    try {
-      const response = await invoke<AnalysisResponse>("analyze_query", {
-        query,
-        csvPath,
-      })
-
-      await loadCurrentChat()
-
-      setQuery("")
-
-      setTimeout(() => {
-        historyContainerRef.current?.scrollTo({ top: 0, behavior: "smooth" })
-      }, 100)
-    } catch (err) {
-      const errorItem: HistoryItem = {
-        id: Date.now(),
-        query,
-        response: {
-          error: (err as any)?.toString() ?? "Unknown error",
-          raw_output: "",
-          code: "",
-          result: "",
-          summary: "",
-        },
-        timestamp: new Date().toLocaleTimeString(),
-        showRecommendedPrompts: true,
-      }
-      setHistory((prev) => [errorItem, ...prev])
-
-      setTimeout(() => {
-        historyContainerRef.current?.scrollTo({ top: 0, behavior: "smooth" })
-      }, 100)
-    } finally {
-      setLoading(false)
-    }
+const handleAnalyze = async () => {
+  if (!query.trim()) return
+  if (!csvPath) {
+    alert("Please load a CSV file first")
+    return
   }
+
+  setLoading(true)
+  try {
+    console.log("Invoking analyze_query with:", { csvPath, query })
+
+    const response = await invoke<AnalysisResponse>("analyze_query", {
+      csvPath,
+      query,
+    })
+
+    console.log("Got response from backend:", response)
+
+    const newItem: HistoryItem = {
+      id: Date.now(),
+      query,
+      response,
+      timestamp: new Date().toLocaleTimeString(),
+      showRecommendedPrompts: true,
+    }
+
+    setHistory((prev) => [newItem, ...prev])
+    setQuery("")
+    setTimeout(() => {
+      historyContainerRef.current?.scrollTo({ top: 0, behavior: "smooth" })
+    }, 100)
+  } catch (err) {
+    console.error("Analyze error:", err)
+    const errorItem: HistoryItem = {
+      id: Date.now(),
+      query,
+      response: {
+        error: (err as any)?.toString() ?? "Unknown error",
+        raw_output: "",
+        code: "",
+        result: "",
+        summary: "",
+      },
+      timestamp: new Date().toLocaleTimeString(),
+      showRecommendedPrompts: true,
+    }
+    setHistory((prev) => [errorItem, ...prev])
+  } finally {
+    setLoading(false)
+  }
+}
 
   const handlePromptClick = (prompt: string) => {
     setQuery(prompt)
@@ -296,7 +303,7 @@ export default function MimirApp() {
     setIsDragging(false)
 
     const files = Array.from(e.dataTransfer.files)
-    const csvFile = files.find((file) => file.name.toLowerCase().endsWith(".csv"))
+    const csvFile:any = files.find((file) => file.name.toLowerCase().endsWith(".csv"))
 
     if (csvFile) {
       try {
@@ -340,7 +347,6 @@ export default function MimirApp() {
   const ChartRenderer = ({ chartJson }: { chartJson?: string }) => {
     const chartRef = useRef<HTMLDivElement>(null)
     const containerRef = useRef<HTMLDivElement>(null)
-    const [chartError, setChartError] = useState<string>("")
 
     useEffect(() => {
       if (!chartJson || !chartRef.current) {
@@ -491,7 +497,6 @@ export default function MimirApp() {
         }
       } catch (err) {
         console.error("ChartRenderer: Failed to render chart:", err)
-        setChartError(`Failed to render chart: ${err instanceof Error ? err.message : "Unknown error"}`)
       }
     }, [chartJson, theme])
 

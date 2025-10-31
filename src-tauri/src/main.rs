@@ -348,7 +348,7 @@ async fn start_python_service(state: State<'_, PythonProcess>) -> Result<String,
     }
 
     let child = Command::new("python")
-        .arg("../python/analyzer.py")
+        .arg("./python/analyzer.py")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -383,9 +383,9 @@ async fn analyze_query(
     log_to_frontend(&app_handle, &format!("Analyzing: {}", query));
 
     let python_bin = if cfg!(target_os = "windows") {
-        "../python/venv/Scripts/python.exe"
+        "./python/venv/Scripts/python.exe"
     } else {
-        "../python/venv/bin/python"
+        "./python/venv/bin/python"
     };
 
     // Get current chat and its history
@@ -403,7 +403,7 @@ async fn analyze_query(
 
     // Pass the CSV path, query, AND history to Python
     let mut command = Command::new(python_bin);
-    command.arg("../python/analyzer.py");
+    command.arg("./python/analyzer.py");
     command.arg(csv_path.clone());
     command.arg(query.clone());
     command.arg(history_json);

@@ -1,0 +1,12 @@
+/app/src-tauri/target/x86_64-pc-windows-gnu/release/deps/toml_writer-3de66fcbd05b70d8.d: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.0.4/src/lib.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.0.4/src/integer.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.0.4/src/key.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.0.4/src/string.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.0.4/src/value.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.0.4/src/write.rs
+
+/app/src-tauri/target/x86_64-pc-windows-gnu/release/deps/libtoml_writer-3de66fcbd05b70d8.rlib: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.0.4/src/lib.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.0.4/src/integer.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.0.4/src/key.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.0.4/src/string.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.0.4/src/value.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.0.4/src/write.rs
+
+/app/src-tauri/target/x86_64-pc-windows-gnu/release/deps/libtoml_writer-3de66fcbd05b70d8.rmeta: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.0.4/src/lib.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.0.4/src/integer.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.0.4/src/key.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.0.4/src/string.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.0.4/src/value.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.0.4/src/write.rs
+
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.0.4/src/lib.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.0.4/src/integer.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.0.4/src/key.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.0.4/src/string.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.0.4/src/value.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.0.4/src/write.rs:

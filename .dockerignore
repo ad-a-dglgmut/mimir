@@ -1,0 +1,7 @@
+node_modules
+target
+src-tauri/target
+src-tauri/python/venv
+.git
+dist
+build
