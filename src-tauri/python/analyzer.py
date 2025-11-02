@@ -621,7 +621,7 @@ Corrected code only:"""
             else:
                 print(str(result)[:2000])  # Limit output length
     else:
-        print("ℹ️ No executable code detected; treating as descriptive query.")
+        print("No executable code detected; treating as descriptive query.")
         error_msg = "No executable code generated"
 
     # Build friendly summary - ALWAYS generate this
