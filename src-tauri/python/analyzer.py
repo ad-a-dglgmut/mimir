@@ -21,8 +21,8 @@ def check_file_type(file_path):
 # 1. CSV loader and cleaner
 # =====================================================
 def load_clean_csv(csv_path):
-    print(f"📂 Loading {csv_path}")
-    print(f"📂 Loading CSV from: {os.path.abspath(csv_path)}")
+    print(f"Loading {csv_path}")
+    print(f"Loading CSV from: {os.path.abspath(csv_path)}")
 
     encodings = ["utf-8-sig", "utf-16", "latin1", "windows-1252"]
     separators = [",", ";", "\t", "|"]
@@ -46,7 +46,7 @@ def load_clean_csv(csv_path):
                         csv_path
                     )
                 if df.shape[1] > 1 and df.shape[0] > 0:
-                    print(f"✅ Loaded successfully with sep='{sep}' encoding='{enc}' → {df.shape}")
+                    print(f"Loaded successfully with sep='{sep}' encoding='{enc}' → {df.shape}")
                     loaded = True
                     break
             except Exception:
@@ -55,7 +55,7 @@ def load_clean_csv(csv_path):
             break
 
     if not loaded or df is None:
-        raise ValueError("❌ Could not parse CSV file with common encodings/delimiters.")
+        raise ValueError("Could not parse CSV file with common encodings/delimiters.")
 
     # Clean headers
     df.columns = [
@@ -78,7 +78,7 @@ def load_clean_csv(csv_path):
     df.dropna(axis=1, how="all", inplace=True)
     df.dropna(axis=0, thresh=int(df.shape[1] * 0.3), inplace=True)
 
-    print("🧹 Cleaned columns:", list(df.columns))
+    print("Cleaned columns:", list(df.columns))
     print(df.head(5).to_string())
     return df
 
@@ -91,12 +91,12 @@ def load_groq_client():
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         raise ValueError(
-            "❌ GROQ_API_KEY not found in environment variables.\n"
+            "GROQ_API_KEY not found in environment variables.\n"
             "Get your free API key at: https://console.groq.com/keys\n"
             "Then set it: export GROQ_API_KEY='your-key-here'"
         )
     
-    print("🚀 Connected to Groq API (Llama 3.3 70B)")
+    print("Connected to Groq API (Llama 3.3 70B)")
     return Groq(api_key=api_key)
 
 
@@ -121,7 +121,7 @@ def call_groq(client, prompt, max_tokens=500, temperature=0.1, role="user"):
 
         # If output seems incomplete, request a clean continuation
         if text.endswith("...") or len(text.split()) > 0.95 * max_tokens:
-            print("⚠️ Output may be incomplete — requesting continuation...")
+            print("Output may be incomplete — requesting continuation...")
             continuation = client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
                 messages=[{"role": "system",
@@ -134,7 +134,7 @@ def call_groq(client, prompt, max_tokens=500, temperature=0.1, role="user"):
 
         return text
     except Exception as e:
-        print(f"❌ Groq API error: {e}")
+        print(f"Groq API error: {e}")
         return None
 
 
@@ -198,7 +198,7 @@ def build_context_from_history(history_json):
         
         return "\n".join(context_lines)
     except Exception as e:
-        print(f"⚠️ Could not parse history: {e}")
+        print(f"Could not parse history: {e}")
         return ""
 
 
@@ -245,12 +245,12 @@ Return ONLY a JSON array with exactly 3-4 strings, no explanations:
                 if prompts_match:
                     prompts = json.loads(prompts_match.group())
                     if len(prompts) >= 3:  # Ensure we have at least 3
-                        print("\n=== 💡 Recommended Prompts ===")
+                        print("\n=== Recommended Prompts ===")
                         for i, prompt in enumerate(prompts, 1):
                             print(f"{i}. {prompt}")
                         return prompts
             except Exception as e:
-                print(f"⚠️ Could not parse recommended prompts: {e}")
+                print(f"Could not parse recommended prompts: {e}")
         
         # Fallback prompts if LLM fails
         fallback_prompts = [
@@ -259,11 +259,11 @@ Return ONLY a JSON array with exactly 3-4 strings, no explanations:
             f"Show me the distribution of {list(df.columns)[5] if len(df.columns) > 5 else 'stock'}",
             f"What are the most common values in each categorical column?"
         ]
-        print("⚠️ Using fallback recommended prompts")
+        print("Using fallback recommended prompts")
         return fallback_prompts[:4]
         
     except Exception as e:
-        print(f"⚠️ Error generating recommended prompts: {e}")
+        print(f"Error generating recommended prompts: {e}")
         # Return basic fallback prompts
         return [
             "Show me more detailed statistics",
@@ -319,7 +319,7 @@ Be concise, professional, and helpful. Return ONLY a JSON array with exactly 2-3
                             print(f"{i}. {rec}")
                         return recommendations
             except Exception as e:
-                print(f"⚠️ Could not parse Mimir recommendations: {e}")
+                print(f"Could not parse Mimir recommendations: {e}")
         
         # Fallback recommendations if LLM fails
         fallback_recs = [
@@ -327,11 +327,11 @@ Be concise, professional, and helpful. Return ONLY a JSON array with exactly 2-3
             "Explore categorical variable distributions to understand data composition",
             "Check for correlations between key numeric variables"
         ]
-        print("⚠️ Using fallback Mimir recommendations")
+        print("Using fallback Mimir recommendations")
         return fallback_recs[:3]
         
     except Exception as e:
-        print(f"⚠️ Error generating Mimir recommendations: {e}")
+        print(f"Error generating Mimir recommendations: {e}")
         # Return basic fallback recommendations
         return [
             "Review data quality and completeness before deeper analysis",
@@ -480,7 +480,7 @@ Code only:"""
     raw_code = call_groq(client, prompt, max_tokens=800, temperature=0.1)
     
     if not raw_code:
-        print("❌ Failed to generate code")
+        print("Failed to generate code")
         return None, None, None, None, None, "Failed to generate code"
 
     print("\n=== Raw LLM output ===")
@@ -527,7 +527,7 @@ Code only:"""
             col2 = match.group(4)
             replacement = f"df['{col1}'] * df['{col2}']"
             code_clean = code_clean.replace(match.group(0), replacement)
-            print(f"🔧 Auto-fixed .mul() on groupby: creating calculated column first")
+            print(f"Auto-fixed .mul() on groupby: creating calculated column first")
 
     # CRITICAL FIX: Add include_groups=False to groupby().apply() calls
     if "groupby(" in code_clean and ".apply(" in code_clean:
@@ -545,7 +545,7 @@ Code only:"""
             code_clean
         )
         
-        print("🔧 Auto-fixed groupby().apply() calls with include_groups=False")
+        print("Auto-fixed groupby().apply() calls with include_groups=False")
 
     print("\n=== Cleaned code ===")
     print(code_clean)
@@ -558,10 +558,10 @@ Code only:"""
         result, error_msg = safe_execute_code(code_clean, df)
         
         if result is None and error_msg:
-            print(f"⚠️ Error executing pandas code: {error_msg}")
+            print(f"Error executing pandas code: {error_msg}")
             
             # Enhanced retry with specific groupby fixes
-            print("\n🔄 Attempting to fix the error...")
+            print("\nAttempting to fix the error...")
             retry_prompt = f"""The previous code failed with this error: {error_msg}
 
 Original question: "{user_query}"
@@ -605,16 +605,16 @@ Corrected code only:"""
                 # Execute retry code safely
                 result, retry_error = safe_execute_code(retry_clean, df)
                 if retry_error:
-                    print(f"❌ Retry also failed: {retry_error}")
+                    print(f"Retry also failed: {retry_error}")
                     error_msg = f"Original: {error_msg}, Retry: {retry_error}"
                 elif result is None:
-                    print("⚠️ Retry executed but 'result' not assigned")
+                    print("Retry executed but 'result' not assigned")
                     error_msg = "Retry executed but 'result' not assigned"
                 else:
                     error_msg = None  # Clear error since retry succeeded
                     
         if result is not None:
-            print("\n=== 📊 Result ===")
+            print("\n=== Result ===")
             # Handle different result types safely
             if hasattr(result, 'head'):
                 print(result.head(20).to_string())
@@ -750,7 +750,7 @@ Output: JSON only.
                 print("\n=== ECharts JSON ===")
                 print(chart_json)
             except Exception:
-                print("\nℹ️ Chart generation skipped (invalid JSON)")
+                print("\nChart generation skipped (invalid JSON)")
 
     return human_text, recommended_prompts, mimir_recommends, chart_json, result, error_msg
 
@@ -781,7 +781,7 @@ if __name__ == "__main__":
         print(json.dumps(mimir_recommends if mimir_recommends else []))
             
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"Error: {e}")
         # Even on error, provide empty JSON arrays so Rust doesn't crash
         print("\n=== Recommended Prompts JSON ===")
         print("[]")
