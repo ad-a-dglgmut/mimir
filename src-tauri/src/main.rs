@@ -643,7 +643,10 @@ fn get_python_analyzer_path(app_handle: &AppHandle) -> Result<String, String> {
     Ok(analyzer_path.to_string_lossy().to_string())
 }
 
-fn parse_python_output(stdout: &str, stderr: &str) -> AnalysisResponse {
+fn parse_python_output(stdout_raw: &str, stderr_raw: &str) -> AnalysisResponse {
+    let stdout = stdout_raw.replace("\r\n", "\n");
+    let stderr = stderr_raw.replace("\r\n", "\n");
+
     let mut response = AnalysisResponse {
         raw_output: stdout.to_string(),
         code: String::new(),
@@ -660,25 +663,19 @@ fn parse_python_output(stdout: &str, stderr: &str) -> AnalysisResponse {
     }
 
     // Helper function to extract section safely
-    fn extract_section(stdout: &str, marker: &str) -> String {
-        if let Some(start) = stdout.find(marker) {
-            let content_start = start + marker.len();
-            let remaining = &stdout[content_start..];
-            
-            // Find the next section marker or use the end
-            let end = remaining.find("===")
-                .unwrap_or(remaining.len());
-            
-            remaining[..end].trim().to_string()
-        } else {
-            String::new()
+    fn extract_section(s: &str, marker: &str) -> String {
+        if let Some(start) = s.find(marker) {
+            let s = &s[start + marker.len()..];
+            let end = s.find("===").unwrap_or(s.len());
+            return s[..end].trim().to_string();
         }
+        String::new()
     }
 
     // Extract sections safely
-    response.code = extract_section(stdout, "=== Cleaned code ===");
-    response.result = extract_section(stdout, "=== 📊 Result ===");
-    response.summary = extract_section(stdout, "=== Analysis Summary ===");
+    response.code = extract_section(&stdout, "=== Cleaned code ===");
+    response.result = extract_section(&stdout, "=== Result ===");
+    response.summary = extract_section(&stdout, "=== Analysis Summary ===");
     
     // Extract chart section
     if let Some(chart_start) = stdout.find("=== ECharts JSON ===") {
