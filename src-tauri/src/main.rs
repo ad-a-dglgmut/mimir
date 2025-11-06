@@ -4,9 +4,10 @@
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::collections::HashMap;
-use tauri::{AppHandle, State, Emitter, Manager};
+use tauri::{AppHandle, State, Manager, Emitter};
 use serde::{Deserialize, Serialize};
 use dirs;
+use chrono; // Add this import
 
 fn log_to_frontend(app_handle: &AppHandle, message: &str) {
     if let Some(window) = app_handle.get_webview_window("main") {
@@ -95,8 +96,8 @@ struct AnalysisResponse {
     summary: String,
     chart: Option<String>,
     error: Option<String>,
-    recommended_prompts: Option<Vec<String>>,     // Add this
-    mimir_recommends: Option<Vec<String>>,        // Add this
+    recommended_prompts: Option<Vec<String>>,
+    mimir_recommends: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -378,6 +379,7 @@ async fn stop_python_service(state: State<'_, PythonProcess>) -> Result<String, 
 
 // ========== MAIN ANALYSIS COMMAND ==========
 
+
 #[tauri::command]
 async fn analyze_query(
     app_handle: tauri::AppHandle, 
@@ -411,9 +413,37 @@ async fn analyze_query(
     command.arg(query.clone());
     command.arg(history_json);
 
+    // FIX: Better environment variable handling for Windows
+    // First try to get from environment
     if let Ok(api_key) = std::env::var("GROQ_API_KEY") {
+        println!("Found GROQ_API_KEY in environment, passing to Python process");
         command.env("GROQ_API_KEY", api_key);
+    } else {
+        // If not in environment, try to read from .env file directly
+        println!("GROQ_API_KEY not found in environment, checking .env file");
+        let env_path = std::path::Path::new("src-tauri/.env");
+        if env_path.exists() {
+            if let Ok(env_content) = std::fs::read_to_string(env_path) {
+                for line in env_content.lines() {
+                    if line.starts_with("GROQ_API_KEY=") && !line.starts_with("#") {
+                        let api_key = line.trim_start_matches("GROQ_API_KEY=").trim();
+                        let api_key = api_key.trim_matches('"').trim_matches('\'');
+                        if !api_key.is_empty() {
+                            println!("Found GROQ_API_KEY in .env file, passing to Python process");
+                            command.env("GROQ_API_KEY", api_key);
+                            break;
+                        }
+                    }
+                }
+            }
+        } else {
+            println!("Warning: .env file not found at {:?}", env_path);
+        }
     }
+
+    // Also pass other potentially important environment variables
+    command.env("PYTHONUTF8", "1"); // Ensure UTF-8 encoding
+    command.env("PYTHONIOENCODING", "utf-8");
 
     let output = command.output()
         .map_err(|e| format!("Failed to execute Python: {}", e))?;
@@ -662,145 +692,69 @@ fn parse_python_output(stdout_raw: &str, stderr_raw: &str) -> AnalysisResponse {
         response.error = Some(stderr.to_string());
     }
 
-    // Helper function to extract section safely
-    fn extract_section(s: &str, marker: &str) -> String {
-        if let Some(start) = s.find(marker) {
-            let s = &s[start + marker.len()..];
-            let end = s.find("===").unwrap_or(s.len());
-            return s[..end].trim().to_string();
+    // Helper function to extract section safely with new markers
+    fn extract_section(s: &str, start_marker: &str, end_marker: &str) -> String {
+        if let Some(start) = s.find(start_marker) {
+            let s = &s[start + start_marker.len()..];
+            if let Some(end) = s.find(end_marker) {
+                return s[..end].trim().to_string();
+            }
         }
         String::new()
     }
 
-    // Extract sections safely
-    response.code = extract_section(&stdout, "=== Cleaned code ===");
-    response.result = extract_section(&stdout, "=== Result ===");
-    response.summary = extract_section(&stdout, "=== Analysis Summary ===");
+    // Extract sections using new consistent markers
+    response.summary = extract_section(&stdout, "=== ANALYSIS_SUMMARY_START ===", "=== ANALYSIS_SUMMARY_END ===");
     
-    // Extract chart section
-    if let Some(chart_start) = stdout.find("=== ECharts JSON ===") {
-        let chart_content = &stdout[chart_start + 20..];
-        let chart_end = chart_content.find("===")
-            .unwrap_or(chart_content.len());
-        let chart_text = chart_content[..chart_end].trim();
-        if !chart_text.is_empty() {
-            response.chart = Some(chart_text.to_string());
+    // Extract recommended prompts
+    let prompts_text = extract_section(&stdout, "=== RECOMMENDED_PROMPTS_START ===", "=== RECOMMENDED_PROMPTS_END ===");
+    if !prompts_text.is_empty() {
+        if let Ok(prompts) = serde_json::from_str::<Vec<String>>(&prompts_text) {
+            response.recommended_prompts = Some(prompts);
         }
     }
-
-    // Extract recommended prompts - EXACT MATCH TO PYTHON OUTPUT
-    if let Some(prompts_start) = stdout.find("=== Recommended Prompts JSON ===") {
-        let prompts_content = &stdout[prompts_start + 31..];
-        let prompts_end = prompts_content.find("===").unwrap_or(prompts_content.len());
-        let prompts_text = prompts_content[..prompts_end].trim();
-        
-        println!("Found recommended prompts JSON text: '{}'", prompts_text);
-        
-        if !prompts_text.is_empty() {
-            match serde_json::from_str::<Vec<String>>(prompts_text) {
-                Ok(prompts) => {
-                    println!("Successfully parsed {} recommended prompts", prompts.len());
-                    response.recommended_prompts = Some(prompts);
-                },
-                Err(e) => {
-                    println!("Failed to parse recommended prompts JSON '{}': {}", prompts_text, e);
-                    // Try to extract array from malformed JSON
-                    if let Some(array_start) = prompts_text.find('[') {
-                        if let Some(array_end) = prompts_text.find(']') {
-                            let array_text = &prompts_text[array_start..=array_end];
-                            println!("Trying to extract array from: '{}'", array_text);
-                            if let Ok(prompts) = serde_json::from_str::<Vec<String>>(array_text) {
-                                println!("Successfully extracted {} prompts from malformed JSON", prompts.len());
-                                response.recommended_prompts = Some(prompts);
-                            }
-                        }
-                    }
-                },
-            }
-        }
-    } else {
-        println!("Could not find '=== Recommended Prompts JSON ===' section");
-        // Try alternative patterns
-        if stdout.contains("Recommended Prompts JSON") {
-            println!("Found alternative 'Recommended Prompts JSON' text, trying to extract...");
-            // Look for any JSON array after this text
-            if let Some(json_start) = stdout.find("[\"") {
-                if let Some(json_end) = stdout[json_start..].find(']') {
-                    let array_text = &stdout[json_start..=json_start + json_end];
-                    println!("Found potential JSON array: '{}'", array_text);
-                    if let Ok(prompts) = serde_json::from_str::<Vec<String>>(array_text) {
-                        println!("Successfully parsed {} prompts from alternative location", prompts.len());
-                        response.recommended_prompts = Some(prompts);
-                    }
-                }
-            }
+    
+    // Extract Mimir recommends
+    let mimir_text = extract_section(&stdout, "=== MIMIR_RECOMMENDS_START ===", "=== MIMIR_RECOMMENDS_END ===");
+    if !mimir_text.is_empty() {
+        if let Ok(recommends) = serde_json::from_str::<Vec<String>>(&mimir_text) {
+            response.mimir_recommends = Some(recommends);
         }
     }
-
-    // Extract Mimir recommends - EXACT MATCH TO PYTHON OUTPUT
-    if let Some(recommends_start) = stdout.find("=== Mimir Recommends JSON ===") {
-        let recommends_content = &stdout[recommends_start + 28..];
-        let recommends_end = recommends_content.find("===").unwrap_or(recommends_content.len());
-        let recommends_text = recommends_content[..recommends_end].trim();
-        
-        println!("Found Mimir recommends JSON text: '{}'", recommends_text);
-        
-        if !recommends_text.is_empty() {
-            match serde_json::from_str::<Vec<String>>(recommends_text) {
-                Ok(recommends) => {
-                    println!("Successfully parsed {} Mimir recommends", recommends.len());
-                    response.mimir_recommends = Some(recommends);
-                },
-                Err(e) => {
-                    println!("Failed to parse Mimir recommends JSON '{}': {}", recommends_text, e);
-                    // Try to extract array from malformed JSON
-                    if let Some(array_start) = recommends_text.find('[') {
-                        if let Some(array_end) = recommends_text.find(']') {
-                            let array_text = &recommends_text[array_start..=array_end];
-                            println!("Trying to extract array from: '{}'", array_text);
-                            if let Ok(recommends) = serde_json::from_str::<Vec<String>>(array_text) {
-                                println!("Successfully extracted {} recommends from malformed JSON", recommends.len());
-                                response.mimir_recommends = Some(recommends);
-                            }
-                        }
-                    }
-                },
-            }
-        }
-    } else {
-        println!("Could not find '=== Mimir Recommends JSON ===' section");
-        // Try alternative patterns
-        if stdout.contains("Mimir Recommends JSON") {
-            println!("Found alternative 'Mimir Recommends JSON' text, trying to extract...");
-            // Look for any JSON array after this text
-            if let Some(json_start) = stdout.find("[\"") {
-                if let Some(json_end) = stdout[json_start..].find(']') {
-                    let array_text = &stdout[json_start..=json_start + json_end];
-                    println!("Found potential JSON array: '{}'", array_text);
-                    if let Ok(recommends) = serde_json::from_str::<Vec<String>>(array_text) {
-                        println!("Successfully parsed {} recommends from alternative location", recommends.len());
-                        response.mimir_recommends = Some(recommends);
-                    }
-                }
-            }
-        }
+    
+    // Extract chart data
+    let chart_text = extract_section(&stdout, "=== CHART_DATA_START ===", "=== CHART_DATA_END ===");
+    if !chart_text.is_empty() && chart_text != "null" {
+        response.chart = Some(chart_text);
     }
-
-    // Debug output to see what we found
-    println!("=== PARSED RESPONSE SUMMARY ===");
-    println!("Code length: {}", response.code.len());
-    println!("Result length: {}", response.result.len());
-    println!("Summary length: {}", response.summary.len());
-    println!("Chart: {}", response.chart.as_ref().map(|c| c.len()).unwrap_or(0));
-    println!("Recommended prompts: {:?}", response.recommended_prompts.as_ref().map(|v| v.len()));
-    println!("Mimir recommends: {:?}", response.mimir_recommends.as_ref().map(|v| v.len()));
-    println!("=================================");
+    
+    // Extract error info
+    let error_text = extract_section(&stdout, "=== ERROR_INFO_START ===", "=== ERROR_INFO_END ===");
+    if !error_text.is_empty() {
+        response.error = Some(error_text);
+    }
 
     response
 }
 
 fn main() {
-    dotenv::dotenv().ok(); 
+    // Load .env file from the correct location
+    let env_path = std::path::Path::new("src-tauri/.env");
+    if env_path.exists() {
+        println!("Loading .env from {:?}", env_path);
+        dotenv::from_path(env_path).ok();
+    } else {
+        println!("Warning: .env not found at {:?}", env_path);
+        // Try current directory as fallback
+        dotenv::dotenv().ok();
+    }
+
+    // Debug check - print if GROQ_API_KEY is loaded
+    match std::env::var("GROQ_API_KEY") {
+        Ok(val) => println!("GROQ_API_KEY loaded: {}...", &val[..10]), // Only print first 10 chars for security
+        Err(_) => println!("GROQ_API_KEY not found in environment"),
+    }
+
     tauri::Builder::default()
         .manage(AppState::default())
         .manage(PythonProcess::default())
@@ -853,7 +807,6 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
-
 fn load_chats_sync(app_handle: &tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
     let app_dir = app_handle.path()
         .app_data_dir()

@@ -45,7 +45,7 @@ def load_clean_csv(csv_path):
                     df = pd.read_excel(
                         csv_path
                     )
-                if df.shape[1] > 1 and df.shape[0] > 0:
+                if df is not None and df.shape[1] > 1 and df.shape[0] > 0:
                     print(f"Loaded successfully with sep='{sep}' encoding='{enc}' → {df.shape}")
                     loaded = True
                     break
@@ -245,9 +245,6 @@ Return ONLY a JSON array with exactly 3-4 strings, no explanations:
                 if prompts_match:
                     prompts = json.loads(prompts_match.group())
                     if len(prompts) >= 3:  # Ensure we have at least 3
-                        print("\n=== Recommended Prompts ===")
-                        for i, prompt in enumerate(prompts, 1):
-                            print(f"{i}. {prompt}")
                         return prompts
             except Exception as e:
                 print(f"Could not parse recommended prompts: {e}")
@@ -314,9 +311,6 @@ Be concise, professional, and helpful. Return ONLY a JSON array with exactly 2-3
                 if recs_match:
                     recommendations = json.loads(recs_match.group())
                     if len(recommendations) >= 2:  # Ensure we have at least 2
-                        print("\n=== Mimir Recommends ===")
-                        for i, rec in enumerate(recommendations, 1):
-                            print(f"{i}. {rec}")
                         return recommendations
             except Exception as e:
                 print(f"Could not parse Mimir recommendations: {e}")
@@ -423,18 +417,19 @@ STRICT RULES:
 9. No markdown fences, no text, just executable code.
 
 CRITICAL PANDAS 2.0+ COMPATIBILITY RULES:
-10. When using df.groupby(...).apply(...):
-   - ALWAYS add `include_groups=False` parameter: `df.groupby('col', group_keys=False).apply(func, include_groups=False)`
+10. DO NOT use `include_groups=False` parameter - it was removed in pandas 2.0+
+11. When using df.groupby(...).apply(...):
+   - Use `group_keys=False` parameter: `df.groupby('col', group_keys=False).apply(func)`
    - OR explicitly exclude grouping columns from the operation
    - Example safe pattern:
      ```
      def analyze_group(group):
          # Work only on non-grouping columns
          return group[['price', 'stock']].mean()
-     result = df.groupby('category', group_keys=False).apply(analyze_group, include_groups=False)
+     result = df.groupby('category', group_keys=False).apply(analyze_group)
      ```
 
-11. When computing correlations per group (e.g., category, brand):
+12. When computing correlations per group (e.g., category, brand):
    - Only compute correlation if the group has at least 2 rows.
    - Skip or return NaN if variance in any column is zero.
    - Use this safe correlation pattern:
@@ -459,10 +454,10 @@ CRITICAL PANDAS 2.0+ COMPATIBILITY RULES:
                      correlations[f'{{col1}}_{{col2}}_corr'] = corr_matrix.iloc[i, j]
          return pd.Series(correlations)
      
-     result = df.groupby('category', group_keys=False).apply(safe_corr, include_groups=False)
+     result = df.groupby('category', group_keys=False).apply(safe_corr)
      ```
 
-12. Prefer built-in aggregation methods over .apply() when possible:
+13. Prefer built-in aggregation methods over .apply() when possible:
    - Use `.agg()`, `.mean()`, `.sum()`, `.describe()` instead of custom apply functions
    - Example: `df.groupby('category')['price'].agg(['mean', 'std'])`
 
@@ -529,23 +524,20 @@ Code only:"""
             code_clean = code_clean.replace(match.group(0), replacement)
             print(f"Auto-fixed .mul() on groupby: creating calculated column first")
 
-    # CRITICAL FIX: Add include_groups=False to groupby().apply() calls
-    if "groupby(" in code_clean and ".apply(" in code_clean:
-        # Pattern 1: groupby with group_keys=False but missing include_groups=False
-        code_clean = re.sub(
-            r"\.groupby\((.*?),?\s*group_keys\s*=\s*False\)\.apply\((.*?)\)",
-            r".groupby(\1, group_keys=False).apply(\2, include_groups=False)",
-            code_clean
-        )
-        
-        # Pattern 2: groupby without any parameters in apply
+    # CRITICAL FIX: Remove include_groups=False from groupby().apply() calls
+    if "include_groups=False" in code_clean:
+        code_clean = code_clean.replace(", include_groups=False", "")
+        code_clean = code_clean.replace("include_groups=False", "")
+        print("Removed deprecated include_groups=False parameter")
+
+    # Ensure group_keys=False is used for groupby().apply()
+    if "groupby(" in code_clean and ".apply(" in code_clean and "group_keys=False" not in code_clean:
         code_clean = re.sub(
             r"\.groupby\((.*?)\)\.apply\((.*?)\)",
-            r".groupby(\1, group_keys=False).apply(\2, include_groups=False)",
+            r".groupby(\1, group_keys=False).apply(\2)",
             code_clean
         )
-        
-        print("Auto-fixed groupby().apply() calls with include_groups=False")
+        print("Added group_keys=False to groupby().apply() calls")
 
     print("\n=== Cleaned code ===")
     print(code_clean)
@@ -572,7 +564,7 @@ Generate corrected Python code that:
 1. Fixes the specific error above
 2. Assigns result to 'result' variable
 3. Uses proper pandas syntax with pandas 2.0+ compatibility
-4. For groupby operations, use `include_groups=False` and `group_keys=False`
+4. For groupby operations, use `group_keys=False` but NEVER `include_groups=False`
 5. Prefer built-in aggregation methods over custom apply functions
 6. Ensure all variables are properly defined before use
 7. Use explicit column names from the dataset instead of undefined variables
@@ -587,15 +579,13 @@ Corrected code only:"""
                 retry_clean = re.sub(r"^```[a-zA-Z]*|```$", "", retry_clean.strip(), flags=re.MULTILINE).strip()
                 
                 # Apply the same fixes to retry code
-                if "groupby(" in retry_clean and ".apply(" in retry_clean:
-                    retry_clean = re.sub(
-                        r"\.groupby\((.*?),?\s*group_keys\s*=\s*False\)\.apply\((.*?)\)",
-                        r".groupby(\1, group_keys=False).apply(\2, include_groups=False)",
-                        retry_clean
-                    )
+                if "include_groups=False" in retry_clean:
+                    retry_clean = retry_clean.replace(", include_groups=False", "").replace("include_groups=False", "")
+                
+                if "groupby(" in retry_clean and ".apply(" in retry_clean and "group_keys=False" not in retry_clean:
                     retry_clean = re.sub(
                         r"\.groupby\((.*?)\)\.apply\((.*?)\)",
-                        r".groupby(\1, group_keys=False).apply(\2, include_groups=False)",
+                        r".groupby(\1, group_keys=False).apply(\2)",
                         retry_clean
                     )
                 
@@ -756,7 +746,7 @@ Output: JSON only.
 
 
 # =====================================================
-# 9. Entry point
+# 9. Entry point - WINDOWS COMPATIBLE OUTPUT FORMAT
 # =====================================================
 
 if __name__ == "__main__":
@@ -773,18 +763,63 @@ if __name__ == "__main__":
         df = load_clean_csv(csv_path)
         summary, recommended_prompts, mimir_recommends, chart, result, error = analyze_data(df, query, client, history_json)
         
-        # ALWAYS print these sections for Rust to parse
-        print("\n=== Recommended Prompts JSON ===")
-        print(json.dumps(recommended_prompts if recommended_prompts else []))
+        # CRITICAL FIX: Use consistent section markers that work on both Windows and Linux
+        # Print each section with clear, unique markers that are easy to parse
+        
+        # 1. Analysis Summary
+        print("\n=== ANALYSIS_SUMMARY_START ===")
+        print(summary if summary else "No summary available")
+        print("=== ANALYSIS_SUMMARY_END ===")
+        
+        # 2. Recommended Prompts (ALWAYS provide JSON array)
+        print("\n=== RECOMMENDED_PROMPTS_START ===")
+        prompts_json = json.dumps(recommended_prompts if recommended_prompts else [])
+        print(prompts_json)
+        print("=== RECOMMENDED_PROMPTS_END ===")
+        
+        # 3. Mimir Recommends (ALWAYS provide JSON array)  
+        print("\n=== MIMIR_RECOMMENDS_START ===")
+        mimir_json = json.dumps(mimir_recommends if mimir_recommends else [])
+        print(mimir_json)
+        print("=== MIMIR_RECOMMENDS_END ===")
+        
+        # 4. Chart data (if available)
+        if chart:
+            print("\n=== CHART_DATA_START ===")
+            print(chart)
+            print("=== CHART_DATA_END ===")
+        else:
+            print("\n=== CHART_DATA_START ===")
+            print("null")
+            print("=== CHART_DATA_END ===")
             
-        print("\n=== Mimir Recommends JSON ===")
-        print(json.dumps(mimir_recommends if mimir_recommends else []))
+        # 5. Error info (if any)
+        if error:
+            print("\n=== ERROR_INFO_START ===")
+            print(error)
+            print("=== ERROR_INFO_END ===")
             
     except Exception as e:
+        print(f"Fatal error in analyzer: {e}")
+        # Even on fatal error, provide the expected JSON sections
+        print("\n=== ANALYSIS_SUMMARY_START ===")
         print(f"Error: {e}")
-        # Even on error, provide empty JSON arrays so Rust doesn't crash
-        print("\n=== Recommended Prompts JSON ===")
+        print("=== ANALYSIS_SUMMARY_END ===")
+        
+        print("\n=== RECOMMENDED_PROMPTS_START ===")
         print("[]")
-        print("\n=== Mimir Recommends JSON ===")
+        print("=== RECOMMENDED_PROMPTS_END ===")
+        
+        print("\n=== MIMIR_RECOMMENDS_START ===")  
         print("[]")
+        print("=== MIMIR_RECOMMENDS_END ===")
+        
+        print("\n=== CHART_DATA_START ===")
+        print("null")
+        print("=== CHART_DATA_END ===")
+        
+        print("\n=== ERROR_INFO_START ===")
+        print(str(e))
+        print("=== ERROR_INFO_END ===")
+        
         sys.exit(1)
