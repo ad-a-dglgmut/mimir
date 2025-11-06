@@ -4,10 +4,12 @@
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use tauri::{AppHandle, State, Manager, Emitter};
 use serde::{Deserialize, Serialize};
 use dirs;
-use chrono; // Add this import
+use dotenv::dotenv;
+use chrono;
 
 fn log_to_frontend(app_handle: &AppHandle, message: &str) {
     if let Some(window) = app_handle.get_webview_window("main") {
@@ -379,7 +381,6 @@ async fn stop_python_service(state: State<'_, PythonProcess>) -> Result<String, 
 
 // ========== MAIN ANALYSIS COMMAND ==========
 
-
 #[tauri::command]
 async fn analyze_query(
     app_handle: tauri::AppHandle, 
@@ -413,33 +414,11 @@ async fn analyze_query(
     command.arg(query.clone());
     command.arg(history_json);
 
-    // FIX: Better environment variable handling for Windows
-    // First try to get from environment
-    if let Ok(api_key) = std::env::var("GROQ_API_KEY") {
-        println!("Found GROQ_API_KEY in environment, passing to Python process");
-        command.env("GROQ_API_KEY", api_key);
-    } else {
-        // If not in environment, try to read from .env file directly
-        println!("GROQ_API_KEY not found in environment, checking .env file");
-        let env_path = std::path::Path::new("src-tauri/.env");
-        if env_path.exists() {
-            if let Ok(env_content) = std::fs::read_to_string(env_path) {
-                for line in env_content.lines() {
-                    if line.starts_with("GROQ_API_KEY=") && !line.starts_with("#") {
-                        let api_key = line.trim_start_matches("GROQ_API_KEY=").trim();
-                        let api_key = api_key.trim_matches('"').trim_matches('\'');
-                        if !api_key.is_empty() {
-                            println!("Found GROQ_API_KEY in .env file, passing to Python process");
-                            command.env("GROQ_API_KEY", api_key);
-                            break;
-                        }
-                    }
-                }
-            }
-        } else {
-            println!("Warning: .env file not found at {:?}", env_path);
-        }
-    }
+    // HARDCODED API KEY - REPLACE WITH YOUR ACTUAL API KEY
+    let api_key = "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".to_string();
+    command.env("GROQ_API_KEY", &api_key);
+    
+    println!("Using hardcoded GROQ_API_KEY: {}...", &api_key[..10.min(api_key.len())]);
 
     // Also pass other potentially important environment variables
     command.env("PYTHONUTF8", "1"); // Ensure UTF-8 encoding
@@ -555,7 +534,7 @@ fn get_python_paths(app_handle: &AppHandle) -> Result<(String, String), String> 
 
     // First try to find Python in the virtual environment
     let venv_python_bin = if cfg!(target_os = "windows") {
-        python_dir.join("venv/bin/python.exe")
+        python_dir.join("venv/Scripts/python.exe")
     } else {
         python_dir.join("venv/bin/python")
     };
@@ -738,22 +717,8 @@ fn parse_python_output(stdout_raw: &str, stderr_raw: &str) -> AnalysisResponse {
 }
 
 fn main() {
-    // Load .env file from the correct location
-    let env_path = std::path::Path::new("src-tauri/.env");
-    if env_path.exists() {
-        println!("Loading .env from {:?}", env_path);
-        dotenv::from_path(env_path).ok();
-    } else {
-        println!("Warning: .env not found at {:?}", env_path);
-        // Try current directory as fallback
-        dotenv::dotenv().ok();
-    }
-
-    // Debug check - print if GROQ_API_KEY is loaded
-    match std::env::var("GROQ_API_KEY") {
-        Ok(val) => println!("GROQ_API_KEY loaded: {}...", &val[..10]), // Only print first 10 chars for security
-        Err(_) => println!("GROQ_API_KEY not found in environment"),
-    }
+    // Don't need to load .env files since we're hardcoding the API key
+    println!("Starting app with hardcoded API key");
 
     tauri::Builder::default()
         .manage(AppState::default())
@@ -807,6 +772,7 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
 fn load_chats_sync(app_handle: &tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
     let app_dir = app_handle.path()
         .app_data_dir()
