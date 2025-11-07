@@ -394,7 +394,214 @@ def safe_execute_code(code, df):
 
 
 # =====================================================
-# 8. Analyze with pandas and Groq (with history context)
+# 8. Enhanced Chart Generation
+# =====================================================
+
+def generate_chart_json(user_query, result):
+    """Generate ECharts compatible JSON based on analysis result"""
+    if result is None:
+        return None
+        
+    try:
+        # Handle different result types
+        if isinstance(result, pd.DataFrame):
+            return generate_dataframe_chart(result, user_query)
+        elif isinstance(result, pd.Series):
+            return generate_series_chart(result, user_query)
+        elif isinstance(result, (list, dict)):
+            return generate_basic_chart(result, user_query)
+        else:
+            return generate_simple_chart(str(result), user_query)
+    except Exception as e:
+        print(f"Chart generation error: {e}")
+        return None
+
+def generate_dataframe_chart(df, user_query):
+    """Generate chart for DataFrame results"""
+    if df.empty:
+        return None
+        
+    # Determine chart type based on data and query
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    categorical_cols = df.select_dtypes(include=['object']).columns.tolist()
+    
+    # Simple bar chart for small categorical data
+    if len(df) <= 15 and len(categorical_cols) >= 1 and len(numeric_cols) >= 1:
+        category_col = categorical_cols[0]
+        value_col = numeric_cols[0] if numeric_cols else df.columns[1]
+        
+        # Get top categories by value
+        chart_data = df.head(10).sort_values(value_col, ascending=False)
+        
+        chart_config = {
+            "title": {
+                "text": f"{value_col} by {category_col}",
+                "left": "center"
+            },
+            "tooltip": {
+                "trigger": "axis",
+                "axisPointer": {
+                    "type": "shadow"
+                }
+            },
+            "xAxis": {
+                "type": "category",
+                "data": chart_data[category_col].tolist(),
+                "axisLabel": {
+                    "rotate": 45
+                }
+            },
+            "yAxis": {
+                "type": "value",
+                "name": value_col
+            },
+            "series": [{
+                "name": value_col,
+                "type": "bar",
+                "data": chart_data[value_col].tolist(),
+                "itemStyle": {
+                    "color": "#5470c6"
+                }
+            }]
+        }
+        return json.dumps(chart_config, indent=2)
+    
+    # Line chart for time series or sequential data
+    elif len(df) > 1 and len(numeric_cols) >= 1:
+        # Try to find a sequence (index or first column)
+        x_data = df.index.tolist() if not df.index.equals(pd.RangeIndex(start=0, stop=len(df))) else list(range(len(df)))
+        value_col = numeric_cols[0]
+        
+        chart_config = {
+            "title": {
+                "text": f"Trend of {value_col}",
+                "left": "center"
+            },
+            "tooltip": {
+                "trigger": "axis"
+            },
+            "xAxis": {
+                "type": "category",
+                "data": x_data,
+                "name": "Index"
+            },
+            "yAxis": {
+                "type": "value",
+                "name": value_col
+            },
+            "series": [{
+                "name": value_col,
+                "type": "line",
+                "data": df[value_col].tolist(),
+                "smooth": True,
+                "itemStyle": {
+                    "color": "#5470c6"
+                }
+            }]
+        }
+        return json.dumps(chart_config, indent=2)
+    
+    return None
+
+def generate_series_chart(series, user_query):
+    """Generate chart for Series results"""
+    if len(series) == 0:
+        return None
+        
+    # Convert series to list for charting
+    if len(series) <= 20:
+        chart_config = {
+            "title": {
+                "text": f"Distribution of {series.name if series.name else 'Values'}",
+                "left": "center"
+            },
+            "tooltip": {
+                "trigger": "item"
+            },
+            "xAxis": {
+                "type": "category",
+                "data": [str(x) for x in series.index.tolist()],
+                "axisLabel": {
+                    "rotate": 45
+                }
+            },
+            "yAxis": {
+                "type": "value"
+            },
+            "series": [{
+                "name": "Values",
+                "type": "bar",
+                "data": series.tolist(),
+                "itemStyle": {
+                    "color": "#91cc75"
+                }
+            }]
+        }
+        return json.dumps(chart_config, indent=2)
+    
+    return None
+
+def generate_basic_chart(data, user_query):
+    """Generate basic chart for list/dict results"""
+    if isinstance(data, dict) and len(data) <= 20:
+        keys = list(data.keys())
+        values = list(data.values())
+        
+        chart_config = {
+            "title": {
+                "text": "Data Distribution",
+                "left": "center"
+            },
+            "tooltip": {
+                "trigger": "item"
+            },
+            "xAxis": {
+                "type": "category",
+                "data": [str(k) for k in keys],
+                "axisLabel": {
+                    "rotate": 45
+                }
+            },
+            "yAxis": {
+                "type": "value"
+            },
+            "series": [{
+                "name": "Values",
+                "type": "bar",
+                "data": values,
+                "itemStyle": {
+                    "color": "#fac858"
+                }
+            }]
+        }
+        return json.dumps(chart_config, indent=2)
+    
+    return None
+
+def generate_simple_chart(result_str, user_query):
+    """Generate a simple text-based visualization for other result types"""
+    # For non-chartable results, return a simple text display
+    chart_config = {
+        "title": {
+            "text": "Analysis Result",
+            "left": "center"
+        },
+        "graphic": {
+            "type": "text",
+            "left": "center",
+            "top": "middle",
+            "style": {
+                "text": f"Result: {result_str[:100]}...",
+                "fontSize": 14,
+                "fill": "#333"
+            }
+        }
+    }
+    return json.dumps(chart_config, indent=2)
+
+
+# =====================================================
+# 9. Main Analysis Function
 # =====================================================
 
 def analyze_data(df, user_query, client, history_json=""):
@@ -514,8 +721,8 @@ Corrected code only:"""
     recommended_prompts = generate_recommended_prompts(df, user_query, result, client)
     mimir_recommends = generate_mimir_recommends(df, user_query, result, client)
     
-    # Generate chart data if appropriate
-    chart_json = generate_chart_data(client, user_query, result)
+    # Generate chart data using our enhanced function
+    chart_json = generate_chart_json(user_query, result)
 
     return summary, recommended_prompts, mimir_recommends, chart_json, result, error_msg
 
@@ -591,68 +798,8 @@ Response:"""
         return fallback_text
 
 
-def generate_chart_data(client, user_query, result):
-    """Generate chart JSON only for appropriate results"""
-    if result is None:
-        return None
-        
-    # Only generate charts for DataFrames/Series with reasonable sizes
-    is_chartable = False
-    chart_data = None
-    
-    if isinstance(result, pd.DataFrame):
-        if 1 <= len(result) <= 50 and any(result.dtypes.apply(lambda x: x.kind in 'biufc')):
-            is_chartable = True
-            chart_data = result.to_dict('records')
-    elif isinstance(result, pd.Series):
-        if 1 <= len(result) <= 30:
-            is_chartable = True
-            chart_data = result.to_dict()
-    
-    if not is_chartable:
-        return None
-        
-    # Simple chart generation for basic patterns
-    prompt_chart = f"""
-User question: "{user_query}" 
-Data: {str(chart_data)[:500]}
-
-Generate a simple bar chart configuration for this data. Return ONLY JSON.
-
-{{
-  "type": "bar",
-  "data": {{
-    "labels": ["list", "of", "categories"],
-    "datasets": [{{
-      "label": "Values",
-      "data": [1, 2, 3]
-    }}]
-  }},
-  "options": {{
-    "title": {{"text": "Chart Title"}},
-    "xAxis": {{"name": "X Axis"}},
-    "yAxis": {{"name": "Y Axis"}}
-  }}
-}}
-"""
-
-    chart_text = call_groq(client, prompt_chart, max_tokens=400, temperature=0.3)
-    
-    if chart_text:
-        try:
-            # Try to extract JSON
-            chart_match = re.search(r'\{.*\}', chart_text, re.DOTALL)
-            if chart_match:
-                json.loads(chart_match.group())
-                return chart_match.group()
-        except Exception:
-            pass
-    
-    return None
-
-
 # =====================================================
-# 9. Entry point - WINDOWS COMPATIBLE OUTPUT FORMAT
+# 10. Entry point - WINDOWS COMPATIBLE OUTPUT FORMAT
 # =====================================================
 
 if __name__ == "__main__":
@@ -691,7 +838,10 @@ if __name__ == "__main__":
         print("=== MIMIR_RECOMMENDS_END ===")
         
         print("\n=== CHART_DATA_START ===")
-        print(chart if chart else "null")
+        if chart:
+            print(chart)
+        else:
+            print("null")
         print("=== CHART_DATA_END ===")
         
         if error:
