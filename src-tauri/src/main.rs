@@ -355,12 +355,19 @@ async fn start_python_service(app_handle: tauri::AppHandle, state: State<'_, Pyt
     let analyzer_path = get_python_analyzer_path(&app_handle)
         .map_err(|e| format!("Failed to get Python analyzer path: {}", e))?;
 
-    let child = Command::new("python")
-        .arg(&analyzer_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+    let mut command = Command::new("python");
+    command.arg(&analyzer_path);
+    command.stdin(Stdio::piped());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    
+    #[cfg(target_os = "windows")]
+    {
+	use std::os::windows::process::CommandExt;
+	const CREATE_NO_WINDOW:u32 = 0x08000000;
+	command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let child = command.spawn()
         .map_err(|e| format!("Failed to start Python: {}", e))?;
 
     *process_lock = Some(child);
@@ -423,6 +430,13 @@ async fn analyze_query(
     // Also pass other potentially important environment variables
     command.env("PYTHONUTF8", "1"); // Ensure UTF-8 encoding
     command.env("PYTHONIOENCODING", "utf-8");
+
+    #[cfg(target_os = "windows")]
+    {
+	use std::os::windows::process::CommandExt;
+	const CREATE_NO_WINDOW:u32 = 0x08000000;
+	command.creation_flags(CREATE_NO_WINDOW);
+    }
 
     let output = command.output()
         .map_err(|e| format!("Failed to execute Python: {}", e))?;
