@@ -1,23 +1,79 @@
+#!/usr/bin/env python3
 import os
 import re
 import json
+import sys
+import uuid
+import tempfile
 import pandas as pd
 import numpy as np
 from groq import Groq
-import sys
 import matplotlib
-matplotlib.use('Agg')  # Set non-interactive backend
+
+# Use Agg backend for any possible plotting in executed code (non-interactive)
+matplotlib.use('Agg')
 
 
 def check_file_type(file_path):
     ext = os.path.splitext(file_path)[1].lower()
-
     if ext == '.csv':
         return 'csv'
     elif ext in ['.xlsx', '.xls']:
         return 'excel'
     else:
         return 'unknown'
+
+
+# =====================================================
+# Data cleaning & normalization helpers
+# =====================================================
+def strip_nonprintable(s):
+    if not isinstance(s, str):
+        return s
+    return re.sub(r'[^\x20-\x7E]', '', s).strip()
+
+
+def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Robust cleaning and lightweight type inference/coercion:
+    - Strip whitespace and non-printables from string columns
+    - Remove common currency symbols and thousands separators for numeric-like columns
+    - Coerce numeric-looking columns to numeric (pd.to_numeric errors='coerce')
+    """
+    df = df.copy()
+
+    # First, ensure column names are strings and sanitized (already done later, but safe)
+    df.columns = [str(c).strip().lower().replace(" ", "_").replace("-", "_") if str(c).strip() != "" else f"col_{i}"
+                  for i, c in enumerate(df.columns)]
+
+    # Strip non-printable chars in all string cells
+    for col in df.columns:
+        # Convert bytes / non-string gracefully
+        if df[col].dtype == object or df[col].dtype.name == 'string':
+            df[col] = df[col].astype(str).apply(strip_nonprintable).replace({'nan': None, 'None': None})
+
+    # Heuristic numeric coercion
+    for col in df.columns:
+        # sample non-null values
+        sample = df[col].dropna().astype(str).head(100)
+        if sample.empty:
+            continue
+
+        # Remove common currency/symbols and commas for testing
+        cleaned = sample.str.replace(r'[\$\£\€\¥,]', '', regex=True).str.replace(r'\s+', '', regex=True)
+        # Now test how many values look numeric
+        looks_numeric = cleaned.str.match(r'^-?\d+(\.\d+)?$')
+        numeric_ratio = float(looks_numeric.sum()) / float(len(cleaned))
+        # If more than 50% look numeric, coerce entire column
+        if numeric_ratio >= 0.5:
+            coerced = pd.to_numeric(
+                df[col].astype(str).str.replace(r'[^\d\.\-]', '', regex=True),
+                errors='coerce'
+            )
+            df[col] = coerced
+
+    return df
+
 
 # =====================================================
 # 1. CSV loader and cleaner
@@ -45,8 +101,8 @@ def load_clean_csv(csv_path):
                     )
                 elif check_file_type(csv_path) == 'excel':
                     df = pd.read_excel(csv_path)
-                
-                if df is not None and df.shape[1] > 1 and df.shape[0] > 0:
+
+                if df is not None and df.shape[1] > 0 and df.shape[0] > 0:
                     print(f"Loaded successfully with sep='{sep}' encoding='{enc}' → {df.shape}")
                     loaded = True
                     break
@@ -74,20 +130,24 @@ def load_clean_csv(csv_path):
         for i, c in enumerate(df.columns)
     ]
 
-    # Strip non-printable chars and junk
-    df = df.map(lambda x: re.sub(r"[^\x20-\x7E]", "", str(x)) if isinstance(x, str) else x)
-    df.replace({
-        "nan": None,
-        "NaN": None,
-        ".": None,
-        "-": None,
-        "--": None,
-        "": None
-    }, inplace=True)
+    # Strip non-printables and normalize strings
+    for col in df.columns:
+        if df[col].dtype == object or df[col].dtype.name == 'string':
+            df[col] = df[col].astype(str).apply(strip_nonprintable).replace({
+                "nan": None,
+                "NaN": None,
+                ".": None,
+                "-": None,
+                "--": None,
+                "": None
+            })
 
     df.dropna(axis=1, how="all", inplace=True)
     if df.shape[0] > 0:
-        df.dropna(axis=0, thresh=int(df.shape[1] * 0.3), inplace=True)
+        df.dropna(axis=0, thresh=max(1, int(df.shape[1] * 0.3)), inplace=True)
+
+    # Normalize data types / coerce numeric-like columns
+    df = normalize_dataframe(df)
 
     print("Cleaned columns:", list(df.columns))
     print("DataFrame shape:", df.shape)
@@ -107,11 +167,10 @@ def load_groq_client():
     if not api_key:
         raise ValueError(
             "GROQ_API_KEY not found in environment variables.\n"
-            "Get your free API key at: https://console.groq.com/keys\n"
-            "Then set it: export GROQ_API_KEY='your-key-here'"
+            "Set it in your environment (for example on Windows: setx GROQ_API_KEY \"your-key\")"
         )
-    
-    print("Connected to Groq API (Llama 3.3 70B)")
+
+    print("Connected to Groq API (client available)")
     return Groq(api_key=api_key)
 
 
@@ -126,17 +185,15 @@ def call_groq(client, prompt, max_tokens=500, temperature=0.1, role="user"):
             model="llama-3.3-70b-versatile",
             messages=[{"role": "system",
                        "content": "You are a helpful, concise data analyst. "
-                                  "Speak only in natural language, never output code or symbols "
-                                  "unless explicitly asked."},
+                                  "Speak only in natural language unless code is requested."},
                       {"role": role, "content": prompt}],
             max_tokens=max_tokens,
             temperature=temperature
         )
         text = response.choices[0].message.content.strip()
 
-        # If output seems incomplete, request a clean continuation
+        # If output seems incomplete, request a continuation
         if text.endswith("...") or len(text.split()) > 0.95 * max_tokens:
-            print("Output may be incomplete — requesting continuation...")
             continuation = client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
                 messages=[{"role": "system",
@@ -159,188 +216,30 @@ def call_groq(client, prompt, max_tokens=500, temperature=0.1, role="user"):
 
 def extract_code(text):
     """Extract only Python code from LLM response, removing explanations."""
-    # First try to find code blocks
+    if not text:
+        return ""
+
+    # First try to find fenced python code blocks
     code_block_match = re.search(r'```(?:python)?\s*\n(.*?)\n```', text, re.DOTALL)
     if code_block_match:
         return code_block_match.group(1).strip()
-    
-    # Otherwise, try to extract lines that look like Python code
+
+    # Otherwise, try to extract obvious python lines
     lines = text.split('\n')
     code_lines = []
-    
     for line in lines:
         stripped = line.strip()
-        # Skip empty lines, comments, and explanatory text
         if not stripped or stripped.startswith('#'):
             continue
-        # Check if line looks like Python code
         if any([
             stripped.startswith('import '),
             stripped.startswith('from '),
             'df.' in stripped or 'df[' in stripped,
             stripped.startswith('result ='),
-            '=' in stripped and not stripped.startswith('To ')
+            re.match(r'^[\w_]+\s*=', stripped)  # simple assignment
         ]):
             code_lines.append(line)
-    
-    return '\n'.join(code_lines) if code_lines else text
-
-
-# =====================================================
-# 5. Build context from history
-# =====================================================
-
-def build_context_from_history(history_json):
-    """Build context string from previous queries and responses"""
-    if not history_json or history_json == "[]":
-        return ""
-    
-    try:
-        history = json.loads(history_json)
-        context_lines = []
-        
-        for i, item in enumerate(history[-3:]):  # Last 3 queries for context
-            query = item.get('query', '')
-            summary = item.get('response', {}).get('summary', '')
-            result = item.get('response', {}).get('result', '')[:200]  # Truncate long results
-            
-            context_lines.append(f"Previous Q {i+1}: {query}")
-            if summary:
-                context_lines.append(f"Previous A {i+1}: {summary}")
-            if result:
-                context_lines.append(f"Previous result {i+1}: {result}")
-            context_lines.append("---")
-        
-        return "\n".join(context_lines)
-    except Exception as e:
-        print(f"Could not parse history: {e}")
-        return ""
-
-
-# =====================================================
-# 6. Generate additional insights - ALWAYS PROVIDE THESE
-# =====================================================
-
-def generate_recommended_prompts(df, user_query, result, client):
-    """Generate follow-up questions based on the current analysis - ALWAYS provide at least 3"""
-    try:
-        # Get result preview for context
-        result_preview = ""
-        if result is not None:
-            if hasattr(result, 'head'):
-                result_preview = str(result.head(5))[:500]
-            else:
-                result_preview = str(result)[:500]
-        
-        prompt = f"""Based on this dataset analysis and the user's question, suggest 3 relevant follow-up questions.
-
-Dataset columns: {list(df.columns)}
-User's question: "{user_query}"
-Analysis result preview: {result_preview}
-
-IMPORTANT: You MUST return exactly 3 follow-up questions as a JSON array of strings.
-
-Focus on:
-- Natural follow-up questions based on the current analysis
-- Deeper exploration of patterns found
-- Related aspects of the data not yet explored
-
-Return ONLY a JSON array with exactly 3 strings, no explanations:
-
-["question 1", "question 2", "question 3"]"""
-
-        print("Generating recommended prompts...")
-        prompts_text = call_groq(client, prompt, max_tokens=400, temperature=0.7)
-        
-        if prompts_text:
-            try:
-                # Extract JSON array
-                prompts_match = re.search(r'\[.*\]', prompts_text, re.DOTALL)
-                if prompts_match:
-                    prompts = json.loads(prompts_match.group())
-                    if len(prompts) >= 2:  # Ensure we have at least 2
-                        return prompts[:3]  # Return max 3
-            except Exception as e:
-                print(f"Could not parse recommended prompts: {e}")
-        
-        # Fallback prompts if LLM fails
-        fallback_prompts = [
-            f"What are the trends in {list(df.columns)[0] if len(df.columns) > 0 else 'the data'}?",
-            f"How are different categories distributed?",
-            f"Show me summary statistics for numeric columns"
-        ]
-        print("Using fallback recommended prompts")
-        return fallback_prompts
-        
-    except Exception as e:
-        print(f"Error generating recommended prompts: {e}")
-        # Return basic fallback prompts
-        return [
-            "Show me more detailed statistics",
-            "What are the correlations between numeric columns?",
-            "Are there any outliers in the data?"
-        ]
-
-
-def generate_mimir_recommends(df, user_query, result, client):
-    """Generate Mimir's expert recommendations based on the analysis - ALWAYS provide at least 2"""
-    try:
-        # Get result preview for context
-        result_preview = ""
-        if result is not None:
-            if hasattr(result, 'head'):
-                result_preview = str(result.head(5))[:500]
-            else:
-                result_preview = str(result)[:500]
-        
-        error_info = ""
-        if result is None:
-            error_info = " (Note: Previous analysis had issues)"
-
-        prompt = f"""As Mimir, the wise data analyst AI, provide 2 expert recommendations based on this analysis.
-
-Dataset info: {list(df.columns)}
-User's question: "{user_query}"
-Analysis result preview: {result_preview}{error_info}
-
-IMPORTANT: You MUST return exactly 2 insightful recommendations as a JSON array of strings.
-
-Provide 2 recommendations that:
-1. Highlight important patterns or insights discovered
-2. Suggest next steps for deeper analysis
-
-Be concise, professional, and helpful. Return ONLY a JSON array with exactly 2 strings:
-
-["recommendation 1", "recommendation 2"]"""
-
-        recommendations_text = call_groq(client, prompt, max_tokens=400, temperature=0.3)
-        
-        if recommendations_text:
-            try:
-                # Extract JSON array
-                recs_match = re.search(r'\[.*\]', recommendations_text, re.DOTALL)
-                if recs_match:
-                    recommendations = json.loads(recs_match.group())
-                    if len(recommendations) >= 1:  # Ensure we have at least 1
-                        return recommendations[:2]  # Return max 2
-            except Exception as e:
-                print(f"Could not parse Mimir recommendations: {e}")
-        
-        # Fallback recommendations if LLM fails
-        fallback_recs = [
-            "Consider analyzing data quality and missing values for more reliable insights",
-            "Explore categorical variable distributions to understand data composition"
-        ]
-        print("Using fallback Mimir recommendations")
-        return fallback_recs
-        
-    except Exception as e:
-        print(f"Error generating Mimir recommendations: {e}")
-        # Return basic fallback recommendations
-        return [
-            "Review data quality and completeness before deeper analysis",
-            "Consider segmenting analysis by key categorical variables"
-        ]
+    return '\n'.join(code_lines).strip() or text
 
 
 # =====================================================
@@ -348,15 +247,17 @@ Be concise, professional, and helpful. Return ONLY a JSON array with exactly 2 s
 # =====================================================
 
 def safe_execute_code(code, df):
-    """Safely execute pandas code with proper imports and error handling"""
-    # Remove import statements since modules are already available
+    """Safely execute pandas code with proper imports and error handling.
+    Post-process the resulting `result` into JSON-able types where possible.
+    """
+    # Remove import statements (we already have pd, np available)
     code_clean = re.sub(r'^\s*(import|from)\s+.*$', '', code, flags=re.MULTILINE)
-    
-    # Add matplotlib workaround - use Agg backend and import
+
+    # Add matplotlib stubs if user code references plt
     if 'plt.' in code_clean or 'matplotlib' in code_clean:
         code_clean = "import matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\n" + code_clean
-    
-    # Create safe execution environment
+
+    # Limited builtins for safety
     safe_builtins = {
         'print': print,
         'len': len,
@@ -378,32 +279,104 @@ def safe_execute_code(code, df):
         'round': round,
         '__import__': __import__,
     }
-    
+
+    # Execution environment
     local_env = {
-        "pd": pd, 
-        "df": df, 
+        "pd": pd,
+        "df": df,
         "np": np,
         "__builtins__": safe_builtins
     }
-    
+
     try:
         exec(code_clean, local_env, local_env)
-        return local_env.get("result"), None
+        raw_result = local_env.get("result", None)
+
+        # Post-process common types to be safe & serializable
+        processed_result = postprocess_result(raw_result)
+        return processed_result, None
     except Exception as e:
         return None, str(e)
+
+
+def postprocess_result(result):
+    """Convert numpy arrays / object arrays / DataFrames / Series to friendly types."""
+    # DataFrame -> keep as DataFrame (caller will handle). Ensure columns and dtypes are simple
+    if isinstance(result, pd.DataFrame):
+        # truncate very wide outputs; convert non-stringable columns safely
+        return result
+
+    if isinstance(result, pd.Series):
+        return result
+
+    # numpy array: try to convert to list
+    if isinstance(result, np.ndarray):
+        try:
+            return result.tolist()
+        except Exception:
+            # fallback: coerce each element to str
+            return [str(x) for x in result.flatten()]
+
+    # If result is list/dict of pandas objects, convert inner pandas to pure types
+    if isinstance(result, list):
+        new_list = []
+        for item in result:
+            if isinstance(item, (pd.DataFrame, pd.Series)):
+                new_list.append(item.to_dict(orient='records') if isinstance(item, pd.DataFrame) else item.tolist())
+            elif isinstance(item, np.ndarray):
+                try:
+                    new_list.append(item.tolist())
+                except Exception:
+                    new_list.append(str(item))
+            else:
+                new_list.append(item)
+        return new_list
+
+    if isinstance(result, dict):
+        new_dict = {}
+        for k, v in result.items():
+            if isinstance(v, (pd.DataFrame, pd.Series)):
+                new_dict[k] = v.to_dict(orient='records') if isinstance(v, pd.DataFrame) else v.tolist()
+            elif isinstance(v, np.ndarray):
+                try:
+                    new_dict[k] = v.tolist()
+                except Exception:
+                    new_dict[k] = str(v)
+            else:
+                new_dict[k] = v
+        return new_dict
+
+    # Primitive or anything else: return as-is
+    return result
 
 
 # =====================================================
 # 8. Enhanced Chart Generation
 # =====================================================
 
+def _safe_as_number(x):
+    try:
+        if x is None:
+            return None
+        if isinstance(x, (int, float, np.integer, np.floating)):
+            if pd.isna(x):
+                return None
+            return float(x)
+        s = str(x).strip()
+        s = re.sub(r'[^\d\.\-]', '', s)
+        if s == '':
+            return None
+        return float(s)
+    except Exception:
+        return None
+
+
 def generate_chart_json(user_query, result):
     """Generate ECharts compatible JSON based on analysis result"""
     if result is None:
         return None
-        
+
     try:
-        # Handle different result types
         if isinstance(result, pd.DataFrame):
             return generate_dataframe_chart(result, user_query)
         elif isinstance(result, pd.Series):
@@ -416,188 +389,326 @@ def generate_chart_json(user_query, result):
         print(f"Chart generation error: {e}")
         return None
 
+
 def generate_dataframe_chart(df, user_query):
     """Generate chart for DataFrame results"""
     if df.empty:
         return None
-        
-    # Determine chart type based on data and query
+
+    # Convert index to simple list for labels
+    df = df.copy()
+
+    # Determine columns
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    categorical_cols = df.select_dtypes(include=['object']).columns.tolist()
-    
-    # Simple bar chart for small categorical data
-    if len(df) <= 15 and len(categorical_cols) >= 1 and len(numeric_cols) >= 1:
+    categorical_cols = df.select_dtypes(include=['object', 'string']).columns.tolist()
+
+    # Coerce first numeric column if present
+    if not numeric_cols:
+        # Try to coerce any column that looks numeric
+        for col in df.columns:
+            coerced = pd.to_numeric(df[col], errors='coerce')
+            if coerced.notna().sum() > 0:
+                numeric_cols.append(col)
+                df[col] = coerced
+                break
+
+    # Small categorical bar: first categorical vs first numeric
+    if len(df) <= 15 and categorical_cols and numeric_cols:
         category_col = categorical_cols[0]
-        value_col = numeric_cols[0] if numeric_cols else df.columns[1]
-        
-        # Get top categories by value
-        chart_data = df.head(10).sort_values(value_col, ascending=False)
-        
-        chart_config = {
-            "title": {
-                "text": f"{value_col} by {category_col}",
-                "left": "center"
-            },
-            "tooltip": {
-                "trigger": "axis",
-                "axisPointer": {
-                    "type": "shadow"
-                }
-            },
-            "xAxis": {
-                "type": "category",
-                "data": chart_data[category_col].tolist(),
-                "axisLabel": {
-                    "rotate": 45
-                }
-            },
-            "yAxis": {
-                "type": "value",
-                "name": value_col
-            },
-            "series": [{
-                "name": value_col,
-                "type": "bar",
-                "data": chart_data[value_col].tolist(),
-                "itemStyle": {
-                    "color": "#5470c6"
-                }
-            }]
-        }
-        return json.dumps(chart_config, indent=2)
-    
-    # Line chart for time series or sequential data
-    elif len(df) > 1 and len(numeric_cols) >= 1:
-        # Try to find a sequence (index or first column)
-        x_data = df.index.tolist() if not df.index.equals(pd.RangeIndex(start=0, stop=len(df))) else list(range(len(df)))
         value_col = numeric_cols[0]
-        
+
+        # Prepare safe series: drop rows with missing category or missing value
+        tmp = df[[category_col, value_col]].dropna(subset=[category_col, value_col]).copy()
+        # Convert category labels to string
+        tmp[category_col] = tmp[category_col].astype(str).str.strip()
+        # Aggregate in case of duplicates (sum)
+        agg = tmp.groupby(category_col, as_index=False, observed=False)[value_col].sum().sort_values(value_col, ascending=False).head(10)
+
+        x = [str(x) for x in agg[category_col].tolist()]
+        y = [float(v) if not pd.isna(v) else 0 for v in agg[value_col].tolist()]
+
         chart_config = {
-            "title": {
-                "text": f"Trend of {value_col}",
-                "left": "center"
-            },
-            "tooltip": {
-                "trigger": "axis"
-            },
-            "xAxis": {
-                "type": "category",
-                "data": x_data,
-                "name": "Index"
-            },
-            "yAxis": {
-                "type": "value",
-                "name": value_col
-            },
-            "series": [{
-                "name": value_col,
-                "type": "line",
-                "data": df[value_col].tolist(),
-                "smooth": True,
-                "itemStyle": {
-                    "color": "#5470c6"
-                }
-            }]
+            "title": {"text": f"{value_col} by {category_col}", "left": "center"},
+            "tooltip": {"trigger": "axis", "axisPointer": {"type": "shadow"}},
+            "xAxis": {"type": "category", "data": x, "axisLabel": {"rotate": 45}},
+            "yAxis": {"type": "value", "name": value_col},
+            "series": [{"name": value_col, "type": "bar", "data": y}]
         }
         return json.dumps(chart_config, indent=2)
-    
+
+    # Trend/line chart for numeric sequence-like data
+    elif len(df) > 1 and numeric_cols:
+        value_col = numeric_cols[0]
+        x_data = df.index.tolist()
+        y_data = [float(v) if not pd.isna(v) else None for v in df[value_col].tolist()]
+
+        # replace None with null in JSON by leaving them as None (json dumps will convert)
+        chart_config = {
+            "title": {"text": f"Trend of {value_col}", "left": "center"},
+            "tooltip": {"trigger": "axis"},
+            "xAxis": {"type": "category", "data": [str(x) for x in x_data], "name": "Index"},
+            "yAxis": {"type": "value", "name": value_col},
+            "series": [{"name": value_col, "type": "line", "data": y_data, "smooth": True}]
+        }
+        return json.dumps(chart_config, indent=2)
+
     return None
+
 
 def generate_series_chart(series, user_query):
-    """Generate chart for Series results"""
-    if len(series) == 0:
+    if series is None or len(series) == 0:
         return None
-        
-    # Convert series to list for charting
-    if len(series) <= 20:
+
+    # If index is meaningful, use it, else use sequential labels
+    labels = [str(x) for x in series.index.tolist()]
+    values = []
+    for v in series.tolist():
+        num = _safe_as_number(v)
+        values.append(num if num is not None else v)
+
+    if len(labels) <= 20:
         chart_config = {
-            "title": {
-                "text": f"Distribution of {series.name if series.name else 'Values'}",
-                "left": "center"
-            },
-            "tooltip": {
-                "trigger": "item"
-            },
-            "xAxis": {
-                "type": "category",
-                "data": [str(x) for x in series.index.tolist()],
-                "axisLabel": {
-                    "rotate": 45
-                }
-            },
-            "yAxis": {
-                "type": "value"
-            },
-            "series": [{
-                "name": "Values",
-                "type": "bar",
-                "data": series.tolist(),
-                "itemStyle": {
-                    "color": "#91cc75"
-                }
-            }]
+            "title": {"text": f"Distribution of {series.name if series.name else 'Values'}", "left": "center"},
+            "tooltip": {"trigger": "item"},
+            "xAxis": {"type": "category", "data": labels, "axisLabel": {"rotate": 45}},
+            "yAxis": {"type": "value"},
+            "series": [{"name": "Values", "type": "bar", "data": values}]
         }
         return json.dumps(chart_config, indent=2)
-    
     return None
+
 
 def generate_basic_chart(data, user_query):
-    """Generate basic chart for list/dict results"""
-    if isinstance(data, dict) and len(data) <= 20:
-        keys = list(data.keys())
-        values = list(data.values())
-        
+    """List/dict to basic bar chart"""
+    if isinstance(data, dict) and len(data) <= 30:
+        keys = [str(k) for k in data.keys()]
+        values = []
+        for v in data.values():
+            num = _safe_as_number(v)
+            values.append(num if num is not None else 0)
         chart_config = {
-            "title": {
-                "text": "Data Distribution",
-                "left": "center"
-            },
-            "tooltip": {
-                "trigger": "item"
-            },
-            "xAxis": {
-                "type": "category",
-                "data": [str(k) for k in keys],
-                "axisLabel": {
-                    "rotate": 45
-                }
-            },
-            "yAxis": {
-                "type": "value"
-            },
-            "series": [{
-                "name": "Values",
-                "type": "bar",
-                "data": values,
-                "itemStyle": {
-                    "color": "#fac858"
-                }
-            }]
+            "title": {"text": "Data Distribution", "left": "center"},
+            "tooltip": {"trigger": "item"},
+            "xAxis": {"type": "category", "data": keys, "axisLabel": {"rotate": 45}},
+            "yAxis": {"type": "value"},
+            "series": [{"name": "Values", "type": "bar", "data": values}]
         }
         return json.dumps(chart_config, indent=2)
-    
+    if isinstance(data, list) and len(data) <= 100:
+        # If list of pairs
+        if all(isinstance(x, (list, tuple)) and len(x) >= 2 for x in data[:20]):
+            keys = [str(x[0]) for x in data]
+            vals = [_safe_as_number(x[1]) or 0 for x in data]
+            chart_config = {
+                "title": {"text": "List Distribution", "left": "center"},
+                "tooltip": {"trigger": "item"},
+                "xAxis": {"type": "category", "data": keys, "axisLabel": {"rotate": 45}},
+                "yAxis": {"type": "value"},
+                "series": [{"name": "Values", "type": "bar", "data": vals}]
+            }
+            return json.dumps(chart_config, indent=2)
     return None
 
+
 def generate_simple_chart(result_str, user_query):
-    """Generate a simple text-based visualization for other result types"""
-    # For non-chartable results, return a simple text display
     chart_config = {
-        "title": {
-            "text": "Analysis Result",
-            "left": "center"
-        },
+        "title": {"text": "Analysis Result", "left": "center"},
         "graphic": {
             "type": "text",
             "left": "center",
             "top": "middle",
-            "style": {
-                "text": f"Result: {result_str[:100]}...",
-                "fontSize": 14,
-                "fill": "#333"
-            }
+            "style": {"text": f"Result: {result_str[:200]}", "fontSize": 14, "fill": "#333"}
         }
     }
     return json.dumps(chart_config, indent=2)
+
+
+# =====================================================
+# 5. Build context from history
+# =====================================================
+def build_context_from_history(history_json):
+    """Build context string from previous queries and responses"""
+    if not history_json or history_json == "[]":
+        return ""
+
+    try:
+        history = json.loads(history_json)
+        context_lines = []
+        for i, item in enumerate(history[-3:]):  # Last 3 queries for context
+            query = item.get('query', '')
+            summary = item.get('response', {}).get('summary', '')
+            result = item.get('response', {}).get('result', '')[:200]  # Truncate long results
+
+            context_lines.append(f"Previous Q {i + 1}: {query}")
+            if summary:
+                context_lines.append(f"Previous A {i + 1}: {summary}")
+            if result:
+                context_lines.append(f"Previous result {i + 1}: {result}")
+            context_lines.append("---")
+
+        return "\n".join(context_lines)
+    except Exception as e:
+        print(f"Could not parse history: {e}")
+        return ""
+
+
+# =====================================================
+# 6 & 9. Generate code, execute, summarize and recommend
+# (kept mostly the same, but more defensive)
+# =====================================================
+
+def apply_pandas_fixes(code):
+    """Apply critical pandas compatibility fixes"""
+    # Remove include_groups=False if LLM outputs it
+    code = code.replace(", include_groups=False", "")
+    code = code.replace("include_groups=False", "")
+
+    # Add group_keys=False where apply on groupby is used (best-effort)
+    if ".groupby(" in code and ".apply(" in code and "group_keys=False" not in code:
+        code = re.sub(
+            r"\.groupby\((.*?)\)\.apply\((.*?)\)",
+            r".groupby(\1, group_keys=False).apply(\2)",
+            code
+        )
+
+    # Fix idxmax/idxmin usage (return all rows that match)
+    # Example mapping: result = df.loc[df['col'].idxmax()] -> transform
+    code = re.sub(
+        r"result\s*=\s*df\.loc\[(df\[['\"]?.+?['\"]?\])\.idxmax\(\)\]",
+        r"max_val = \1.max()\nresult = df.loc[df[\1] == max_val]",
+        code
+    )
+    code = re.sub(
+        r"result\s*=\s*df\.loc\[(df\[['\"]?.+?['\"]?\])\.idxmin\(\)\]",
+        r"min_val = \1.min()\nresult = df.loc[df[\1] == min_val]",
+        code
+    )
+
+    # Remove matplotlib imports/usages since we produce chart JSON externally
+    code = re.sub(r'^\s*(import matplotlib|import plt|from matplotlib).*$', '', code, flags=re.MULTILINE)
+    code = re.sub(r'^\s*plt\.\w+\(.*$', '', code, flags=re.MULTILINE)
+
+    return code
+
+
+def generate_analysis_summary(client, user_query, result, error_msg):
+    """Generate human-readable summary of analysis results"""
+    result_preview = ""
+    if result is not None:
+        try:
+            if isinstance(result, pd.DataFrame):
+                result_preview = result.head(8).to_string()[:800]
+            elif isinstance(result, pd.Series):
+                result_preview = result.head(8).to_string()[:800]
+            else:
+                result_preview = str(result)[:800]
+        except Exception:
+            result_preview = str(type(result))
+    elif error_msg:
+        result_preview = f"Analysis encountered an error: {error_msg}"
+    else:
+        result_preview = "No analysis result available"
+
+    result_preview = re.sub(r'[^\x20-\x7E]+', ' ', str(result_preview))
+
+    prompt_summary = f"""User question: "{user_query}"
+Analysis result: {result_preview}
+
+Provide a clear, concise explanation of what the result shows. Focus on the key findings and what they mean.
+
+Response:"""
+
+    human_text = call_groq(client, prompt_summary, max_tokens=300, temperature=0.7)
+
+    if human_text:
+        print("\n=== Analysis Summary ===")
+        print(human_text)
+        return human_text
+    else:
+        fallback_text = "I analyzed your data. " + ("The results show meaningful patterns." if result is not None else "There was an issue with the analysis.")
+        print("\n=== Analysis Summary ===")
+        print(fallback_text)
+        return fallback_text
+
+
+def generate_recommended_prompts(df, user_query, result, client):
+    """Generate follow-up questions (returns at least 3 fallback ones)"""
+    try:
+        result_preview = ""
+        if result is not None:
+            if hasattr(result, 'head'):
+                result_preview = str(result.head(5))[:500]
+            else:
+                result_preview = str(result)[:500]
+
+        prompt = f"""Based on this dataset analysis and the user's question, suggest 3 relevant follow-up questions.
+
+Dataset columns: {list(df.columns)}
+User's question: "{user_query}"
+Analysis result preview: {result_preview}
+
+IMPORTANT: You MUST return exactly 3 follow-up questions as a JSON array of strings.
+
+Return ONLY a JSON array with exactly 3 strings, no explanations:
+["question 1", "question 2", "question 3"]"""
+
+        prompts_text = call_groq(client, prompt, max_tokens=300, temperature=0.7)
+        if prompts_text:
+            prompts_match = re.search(r'\[.*\]', prompts_text, re.DOTALL)
+            if prompts_match:
+                prompts = json.loads(prompts_match.group())
+                if isinstance(prompts, list) and len(prompts) >= 1:
+                    return prompts[:3]
+    except Exception as e:
+        print(f"Could not generate recommended prompts: {e}")
+
+    # Fallback
+    return [
+        f"What are the trends in {list(df.columns)[0] if len(df.columns) > 0 else 'the data'}?",
+        "How are different categories distributed?",
+        "Show me summary statistics for numeric columns"
+    ]
+
+
+def generate_mimir_recommends(df, user_query, result, client):
+    """Generate 2 expert recommendations"""
+    try:
+        result_preview = ""
+        if result is not None:
+            if hasattr(result, 'head'):
+                result_preview = str(result.head(5))[:500]
+            else:
+                result_preview = str(result)[:500]
+
+        error_info = ""
+        if result is None:
+            error_info = " (Note: Previous analysis had issues)"
+
+        prompt = f"""As Mimir, the wise data analyst AI, provide 2 expert recommendations based on this analysis.
+
+Dataset info: {list(df.columns)}
+User's question: "{user_query}"
+Analysis result preview: {result_preview}{error_info}
+
+IMPORTANT: You MUST return exactly 2 insightful recommendations as a JSON array of strings.
+
+Return ONLY a JSON array with exactly 2 strings:
+["recommendation 1", "recommendation 2"]"""
+
+        recommendations_text = call_groq(client, prompt, max_tokens=300, temperature=0.3)
+        if recommendations_text:
+            recs_match = re.search(r'\[.*\]', recommendations_text, re.DOTALL)
+            if recs_match:
+                recommendations = json.loads(recs_match.group())
+                if isinstance(recommendations, list) and len(recommendations) >= 1:
+                    return recommendations[:2]
+    except Exception as e:
+        print(f"Could not generate Mimir recommendations: {e}")
+
+    return [
+        "Consider analyzing data quality and missing values for more reliable insights",
+        "Explore categorical variable distributions to understand data composition"
+    ]
 
 
 # =====================================================
@@ -605,17 +716,16 @@ def generate_simple_chart(result_str, user_query):
 # =====================================================
 
 def analyze_data(df, user_query, client, history_json=""):
-    # Build context from history
+    # Build context from history (but don't pass huge history to LLM directly)
     history_context = build_context_from_history(history_json)
-    
-    # Create safer previews
+
     csv_preview = df.head(3).to_csv(index=False) if df.shape[0] > 0 else "Empty DataFrame"
     col_info = "\n".join([f"- {col}: {df[col].dtype}" for col in df.columns])
-    
+
     prompt = f"""You are an expert Python data analyst. Generate clean, executable pandas code to analyze dataframe `df` and accurately answer the user's question.
 
 CRITICAL RULES FOR PANDAS 2.0+ COMPATIBILITY:
-1. NEVER use `include_groups=False` - this parameter was removed in pandas 2.0
+1. NEVER use `include_groups=False`
 2. For groupby operations, use `group_keys=False` instead
 3. DO NOT import matplotlib or any plotting libraries - we handle charts separately
 4. Use simple pandas operations without complex dependencies
@@ -640,7 +750,7 @@ Code only:"""
 
     print("Generating pandas code...")
     raw_code = call_groq(client, prompt, max_tokens=600, temperature=0.1)
-    
+
     if not raw_code:
         print("Failed to generate code")
         return None, None, None, None, None, "Failed to generate code"
@@ -648,29 +758,25 @@ Code only:"""
     print("\n=== Raw LLM output ===")
     print(raw_code)
 
-    # Extract clean code
+    # Extract and clean code
     code_clean = extract_code(raw_code)
-    
-    # Remove any remaining code fences and explanations
     code_clean = re.sub(r"^```[a-zA-Z]*|```$", "", code_clean.strip(), flags=re.MULTILINE).strip()
-    
-    # Apply critical fixes for pandas compatibility
     code_clean = apply_pandas_fixes(code_clean)
-    
+
     print("\n=== Cleaned code ===")
     print(code_clean)
 
     result = None
     error_msg = None
-    
-    if len(code_clean) > 10:  # Minimum viable code length
+
+    if len(code_clean) > 10:
         result, error_msg = safe_execute_code(code_clean, df)
-        
+
         if result is None and error_msg:
             print(f"Error executing pandas code: {error_msg}")
-            
-            # Retry with simpler approach
-            print("\nAttempting to fix the error...")
+
+            # Retry with a very simple fallback pattern if possible
+            print("\nAttempting to fix the error with simplified code...")
             retry_prompt = f"""The previous code failed with this error: {error_msg}
 
 Original question: "{user_query}"
@@ -683,16 +789,16 @@ Generate SIMPLE, corrected Python code that:
 4. No complex operations, no plotting
 
 Corrected code only:"""
-            
+
             retry_code = call_groq(client, retry_prompt, max_tokens=400, temperature=0.1)
             if retry_code:
                 retry_clean = extract_code(retry_code)
                 retry_clean = re.sub(r"^```[a-zA-Z]*|```$", "", retry_clean.strip(), flags=re.MULTILINE).strip()
                 retry_clean = apply_pandas_fixes(retry_clean)
-                
+
                 print("\n=== Retry code ===")
                 print(retry_clean)
-                
+
                 result, retry_error = safe_execute_code(retry_clean, df)
                 if retry_error:
                     print(f"Retry also failed: {retry_error}")
@@ -701,157 +807,96 @@ Corrected code only:"""
                     print("Retry executed but 'result' not assigned")
                     error_msg = "Retry executed but 'result' not assigned"
                 else:
-                    error_msg = None  # Clear error since retry succeeded
-                    
-        if result is not None:
-            print("\n=== Result ===")
-            # Handle different result types safely
-            if hasattr(result, 'head'):
-                print(result.head(10).to_string())
-            else:
-                print(str(result)[:1000])  # Limit output length
+                    error_msg = None
     else:
         print("No executable code detected")
         error_msg = "No executable code generated"
 
-    # Generate summary
+    # Generate summary and recommendations
     summary = generate_analysis_summary(client, user_query, result, error_msg)
-    
-    # Generate recommendations
     recommended_prompts = generate_recommended_prompts(df, user_query, result, client)
     mimir_recommends = generate_mimir_recommends(df, user_query, result, client)
-    
-    # Generate chart data using our enhanced function
+
+    # Chart JSON generation
     chart_json = generate_chart_json(user_query, result)
 
     return summary, recommended_prompts, mimir_recommends, chart_json, result, error_msg
 
 
-def apply_pandas_fixes(code):
-    """Apply critical pandas compatibility fixes"""
-    # Remove include_groups=False
-    code = code.replace(", include_groups=False", "")
-    code = code.replace("include_groups=False", "")
-    
-    # Add group_keys=False to groupby().apply()
-    if "groupby(" in code and ".apply(" in code and "group_keys=False" not in code:
-        code = re.sub(
-            r"\.groupby\((.*?)\)\.apply\((.*?)\)",
-            r".groupby(\1, group_keys=False).apply(\2)",
-            code
-        )
-    
-    # Fix common idxmax/idxmin patterns to return all matching rows
-    if ".idxmax()" in code or ".idxmin()" in code:
-        if "df.loc[df[" not in code:
-            code = re.sub(
-                r"result\s*=\s*df\.loc\[(.*?)\.idxmax\(\)\]",
-                r"max_val = \1.max()\nresult = df[\1 == max_val]",
-                code
-            )
-            code = re.sub(
-                r"result\s*=\s*df\.loc\[(.*?)\.idxmin\(\)\]",
-                r"min_val = \1.min()\nresult = df[\1 == min_val]",
-                code
-            )
-    
-    # Remove matplotlib imports and usage
-    code = re.sub(r'^\s*(import matplotlib|import plt|from matplotlib).*$', '', code, flags=re.MULTILINE)
-    code = re.sub(r'^\s*plt\.\w+\(.*$', '', code, flags=re.MULTILINE)
-    
-    return code
-
-
-def generate_analysis_summary(client, user_query, result, error_msg):
-    """Generate human-readable summary of analysis results"""
-    result_preview = ""
-    if result is not None:
-        if hasattr(result, 'head'):
-            result_preview = result.head(8).to_string()[:800]
-        else:
-            result_preview = str(result)[:800]
-    elif error_msg:
-        result_preview = f"Analysis encountered an error: {error_msg}"
-    else:
-        result_preview = "No analysis result available"
-
-    # Clean non-printable characters
-    result_preview = re.sub(r'[^\x20-\x7E]+', ' ', str(result_preview))
-
-    prompt_summary = f"""User question: "{user_query}"
-Analysis result: {result_preview}
-
-Provide a clear, concise explanation of what the result shows. Focus on the key findings and what they mean.
-
-Response:"""
-
-    human_text = call_groq(client, prompt_summary, max_tokens=300, temperature=0.7)
-
-    if human_text:
-        print("\n=== Analysis Summary ===")
-        print(human_text)
-        return human_text
-    else:
-        fallback_text = "I analyzed your data. " + ("The results show meaningful patterns." if result is not None else "There was an issue with the analysis.")
-        print("\n=== Analysis Summary ===")
-        print(fallback_text)
-        return fallback_text
-
-
 # =====================================================
-# 10. Entry point - WINDOWS COMPATIBLE OUTPUT FORMAT
+# 10. Entry point - supports history passed as @<tempfile>
 # =====================================================
+
+def read_history_arg(arg: str) -> str:
+    """If arg starts with '@', treat as file path and read JSON from it.
+    Otherwise treat as the JSON string itself.
+    """
+    if not arg:
+        return "[]"
+    if arg.startswith("@"):
+        path = arg[1:]
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read()
+        except Exception as e:
+            print(f"Failed to read history file {path}: {e}")
+            return "[]"
+    return arg
+
 
 if __name__ == "__main__":
-    if len(sys.argv) < 4:
-        print("Usage: python analyzer.py <csv_path> <query> <history_json>")
+    if len(sys.argv) < 3:
+        print("Usage: python analyzer.py <csv_path> <query> [history_arg_or_@historyfile]")
         sys.exit(1)
-    
+
     csv_path = sys.argv[1]
     query = sys.argv[2]
-    history_json = sys.argv[3]
-    
+    history_arg = sys.argv[3] if len(sys.argv) >= 4 else "[]"
+
+    # If history is passed as @<file>, read it. This avoids huge command lines.
+    history_json = read_history_arg(history_arg)
+
     try:
         # Set working directory to script directory to avoid path issues
         script_dir = os.path.dirname(os.path.abspath(__file__))
         os.chdir(script_dir)
-        
+
         client = load_groq_client()
         df = load_clean_csv(csv_path)
-        
+
         if df.shape[0] == 0:
             raise ValueError("DataFrame is empty after loading and cleaning")
-            
+
         summary, recommended_prompts, mimir_recommends, chart, result, error = analyze_data(df, query, client, history_json)
-        
-        # Output with clear section markers
+
+        # Output structured markers (kept the same for Rust parser)
         print("\n=== ANALYSIS_SUMMARY_START ===")
         print(summary if summary else "No summary available")
         print("=== ANALYSIS_SUMMARY_END ===")
-        
+
         print("\n=== RECOMMENDED_PROMPTS_START ===")
         print(json.dumps(recommended_prompts if recommended_prompts else []))
         print("=== RECOMMENDED_PROMPTS_END ===")
-        
+
         print("\n=== MIMIR_RECOMMENDS_START ===")
         print(json.dumps(mimir_recommends if mimir_recommends else []))
         print("=== MIMIR_RECOMMENDS_END ===")
-        
+
         print("\n=== CHART_DATA_START ===")
         if chart:
             print(chart)
         else:
             print("null")
         print("=== CHART_DATA_END ===")
-        
+
         if error:
             print("\n=== ERROR_INFO_START ===")
             print(error)
             print("=== ERROR_INFO_END ===")
-            
+
     except Exception as e:
         print(f"Fatal error: {e}")
-        # Provide structured output even on error
+        # Provide structured output even on fatal error
         print("\n=== ANALYSIS_SUMMARY_START ===")
         print(f"Error loading or analyzing data: {e}")
         print("=== ANALYSIS_SUMMARY_END ===")

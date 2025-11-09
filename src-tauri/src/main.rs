@@ -4,11 +4,9 @@
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use tauri::{AppHandle, State, Manager, Emitter};
 use serde::{Deserialize, Serialize};
 use dirs;
-use dotenv::dotenv;
 use chrono;
 
 fn log_to_frontend(app_handle: &AppHandle, message: &str) {
@@ -404,42 +402,58 @@ async fn analyze_query(
     // Get current chat and its history
     let current_chat = state.current_chat.lock().unwrap();
     let mut chats = state.chats.lock().unwrap();
-    
+
     let chat_data = chats.get_mut(&*current_chat)
         .ok_or("Current chat not found".to_string())?;
-    
+
     // Update CSV path for this chat
     chat_data.csv_path = Some(csv_path.clone());
-    
+
     let history_json = serde_json::to_string(&chat_data.history)
         .map_err(|e| format!("Failed to serialize history: {}", e))?;
 
-    // Pass the CSV path, query, AND history to Python
+    // Create a temp file for history to avoid long command line on Windows
+    let mut tmp_path = std::env::temp_dir();
+    let filename = format!("mimir_history_{}.json", chrono::Utc::now().timestamp_nanos());
+    tmp_path.push(&filename);
+
+    if let Err(e) = std::fs::write(&tmp_path, &history_json) {
+        eprintln!("Warning: Could not write history temp file: {}", e);
+        // Continue — we will still try to pass the JSON directly as fallback (but risk long cmd)
+    }
+
+    // Build command to call Python analyzer; pass history as @<tempfile>
     let mut command = Command::new(&python_bin);
     command.arg(&analyzer_path);
     command.arg(csv_path.clone());
     command.arg(query.clone());
-    command.arg(history_json);
 
-    // HARDCODED API KEY - REPLACE WITH YOUR ACTUAL API KEY
-    let api_key = "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".to_string();
-    command.env("GROQ_API_KEY", &api_key);
-    
-    println!("Using hardcoded GROQ_API_KEY: {}...", &api_key[..10.min(api_key.len())]);
+    // Pass history as @tempfile path to avoid long command line
+    let history_arg = format!("@{}", tmp_path.to_string_lossy());
+    command.arg(history_arg);
 
-    // Also pass other potentially important environment variables
+    // Require GROQ_API_KEY in environment rather than hardcoding
+    let api_key = "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";
+    command.env("GROQ_API_KEY", api_key);
+
+    // Also pass other environment variables
     command.env("PYTHONUTF8", "1"); // Ensure UTF-8 encoding
     command.env("PYTHONIOENCODING", "utf-8");
 
     #[cfg(target_os = "windows")]
     {
-	use std::os::windows::process::CommandExt;
-	const CREATE_NO_WINDOW:u32 = 0x08000000;
-	command.creation_flags(CREATE_NO_WINDOW);
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW:u32 = 0x08000000;
+        command.creation_flags(CREATE_NO_WINDOW);
     }
 
     let output = command.output()
         .map_err(|e| format!("Failed to execute Python: {}", e))?;
+
+    // Attempt to remove temp file (best-effort)
+    if tmp_path.exists() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -463,7 +477,7 @@ async fn analyze_query(
     let app_handle_clone = app_handle.clone();
     let current_chat_clone = current_chat.clone();
     let chat_data_clone = chat_data.clone();
-    
+
     tauri::async_runtime::spawn_blocking(move || {
         if let Err(e) = save_chat_data_blocking(&app_handle_clone, &current_chat_clone, &chat_data_clone) {
             eprintln!("Warning: Could not save chat data: {}", e);
