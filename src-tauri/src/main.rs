@@ -21,6 +21,62 @@ struct ChatData {
     csv_path: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+struct LoginInfo {
+    username: String,
+    password: String,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct RefreshToken {
+    #[serde(rename = "refreshToken")]
+    refresh_token: String
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct LoginResponse {
+    #[serde(rename = "accessToken")]
+    access_token: String,
+    #[serde(rename = "refreshToken")]
+    refresh_token: String,
+    username: String,
+    email: String,
+    roles: Vec<String>,
+    #[serde(rename = "type")]
+    token_type: String,
+}
+
+async fn get_api_key(jwt_token: String) -> Result<String, String> {
+    let api_route = "http://localhost:8080";
+    
+    if jwt_token.is_empty() {
+        return Err("No JWT token provided".to_string());
+    }
+    
+    let client = reqwest::Client::builder()
+        .build()
+        .map_err(|e| format!("Failed to build client: {}", e))?;
+    
+    let response = client
+        .get(format!("{}/api/", api_route))
+        .header("Authorization", format!("Bearer {}", jwt_token))
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {}", e))?;
+    
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_body = response.text().await.unwrap_or_default();
+        return Err(format!("HTTP {}: {}", status, error_body));
+    }
+    
+    let api_key = response.text()
+        .await
+        .map_err(|e| format!("Failed to read response: {}", e))?;
+    
+    Ok(api_key)
+}
+
 fn save_chat_data_blocking(
     app_handle: &tauri::AppHandle,
     chat_name: &str,
@@ -42,6 +98,38 @@ fn save_chat_data_blocking(
         .map_err(|e| format!("Failed to save chat data: {}", e))?;
     
     Ok(())
+}
+
+fn save_login(app_handle: &AppHandle, login_info: &RefreshToken) -> Result<(), String> {
+    let login_info_json = serde_json::to_string_pretty(login_info)
+        .map_err(|e| format!("Failed to serialize login info: {}", e))?;
+
+    let app_dir = app_handle.path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+
+    let login_path = app_dir.join("logininfo.json");
+
+    std::fs::write(&login_path, login_info_json)
+        .map_err(|e| format!("Failed to save login info: {}", e))?;
+    
+    Ok(())
+}
+
+fn load_login(app_handle: &AppHandle) -> Result<RefreshToken, String> {
+    let app_dir = app_handle.path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+
+    let login_path = app_dir.join("logininfo.json");
+
+    let data = std::fs::read_to_string(&login_path)
+        .map_err(|e| format!("Failed to read login info: {}", e))?;
+
+    let login_info: RefreshToken = serde_json::from_str(&data)
+        .map_err(|e| format!("Failed to deserialize login info: {}", e))?;
+
+    Ok(login_info)
 }
 
 fn load_chat_data_blocking(
@@ -77,8 +165,9 @@ struct PythonProcess {
 
 #[derive(Default)]
 struct AppState {
-    chats: Mutex<HashMap<String, ChatData>>, // Chat name -> ChatData
-    current_chat: Mutex<String>, // Current active chat name
+    chats: Mutex<HashMap<String, ChatData>>,
+    current_chat: Mutex<String>,
+    jwt_token: Mutex<String>
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -122,7 +211,6 @@ async fn create_chat(
         return Err(format!("Chat '{}' already exists", chat_name));
     }
     
-    // Create empty chat
     let chat_data = ChatData {
         history: Vec::new(),
         csv_path: None,
@@ -130,11 +218,9 @@ async fn create_chat(
     
     chats.insert(chat_name.clone(), chat_data);
     
-    // Set as current chat
     let mut current_chat = state.current_chat.lock().unwrap();
     *current_chat = chat_name.clone();
     
-    // Save empty chat to file
     let app_handle_clone = app_handle.clone();
     let chat_name_clone = chat_name.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -206,7 +292,6 @@ async fn delete_chat(
         return Err(format!("Chat '{}' not found", chat_name));
     }
     
-    // Don't allow deleting the current chat
     let current_chat = state.current_chat.lock().unwrap();
     if *current_chat == chat_name {
         return Err("Cannot delete the current chat. Switch to another chat first.".to_string());
@@ -214,7 +299,6 @@ async fn delete_chat(
     
     chats.remove(&chat_name);
     
-    // Delete the file
     let app_dir = app_handle.path()
         .app_data_dir()
         .map_err(|e| format!("Failed to get app data dir: {}", e))?;
@@ -242,7 +326,6 @@ async fn set_csv_path(
     if let Some(chat_data) = chats.get_mut(&*current_chat) {
         chat_data.csv_path = Some(csv_path.clone());
         
-        // Save updated chat data
         let app_handle_clone = app_handle.clone();
         let current_chat_clone = current_chat.clone();
         let chat_data_clone = chat_data.clone();
@@ -285,7 +368,6 @@ async fn clear_history(
         let count = chat_data.history.len();
         chat_data.history.clear();
         
-        // Save updated chat data
         let app_handle_clone = app_handle.clone();
         let current_chat_clone = current_chat.clone();
         let chat_data_clone = chat_data.clone();
@@ -349,7 +431,6 @@ async fn start_python_service(app_handle: tauri::AppHandle, state: State<'_, Pyt
         return Ok("Python service already running".to_string());
     }
 
-    // Get the path to the Python analyzer script
     let analyzer_path = get_python_analyzer_path(&app_handle)
         .map_err(|e| format!("Failed to get Python analyzer path: {}", e))?;
 
@@ -361,10 +442,11 @@ async fn start_python_service(app_handle: tauri::AppHandle, state: State<'_, Pyt
     
     #[cfg(target_os = "windows")]
     {
-	use std::os::windows::process::CommandExt;
-	const CREATE_NO_WINDOW:u32 = 0x08000000;
-	command.creation_flags(CREATE_NO_WINDOW);
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW:u32 = 0x08000000;
+        command.creation_flags(CREATE_NO_WINDOW);
     }
+    
     let child = command.spawn()
         .map_err(|e| format!("Failed to start Python: {}", e))?;
 
@@ -395,49 +477,49 @@ async fn analyze_query(
 ) -> Result<AnalysisResponse, String> {
     log_to_frontend(&app_handle, &format!("Analyzing: {}", query));
 
-    // Get the path to the Python executable and analyzer script
     let (python_bin, analyzer_path) = get_python_paths(&app_handle)
         .map_err(|e| format!("Failed to get Python paths: {}", e))?;
 
-    // Get current chat and its history
-    let current_chat = state.current_chat.lock().unwrap();
-    let mut chats = state.chats.lock().unwrap();
+    let jwt_token = {
+        let token_guard = state.jwt_token.lock().unwrap();
+        token_guard.clone()
+    };
+    
+    let api_key = get_api_key(jwt_token).await?;
 
-    let chat_data = chats.get_mut(&*current_chat)
-        .ok_or("Current chat not found".to_string())?;
+    let (current_chat_name, history_json) = {
+        let current_chat = state.current_chat.lock().unwrap();
+        let mut chats = state.chats.lock().unwrap();
 
-    // Update CSV path for this chat
-    chat_data.csv_path = Some(csv_path.clone());
+        let chat_data = chats.get_mut(&*current_chat)
+            .ok_or("Current chat not found".to_string())?;
 
-    let history_json = serde_json::to_string(&chat_data.history)
-        .map_err(|e| format!("Failed to serialize history: {}", e))?;
+        chat_data.csv_path = Some(csv_path.clone());
 
-    // Create a temp file for history to avoid long command line on Windows
+        let history_json = serde_json::to_string(&chat_data.history)
+            .map_err(|e| format!("Failed to serialize history: {}", e))?;
+        
+        (current_chat.clone(), history_json)
+    };
+
     let mut tmp_path = std::env::temp_dir();
     let filename = format!("mimir_history_{}.json", chrono::Utc::now().timestamp_nanos());
     tmp_path.push(&filename);
 
     if let Err(e) = std::fs::write(&tmp_path, &history_json) {
         eprintln!("Warning: Could not write history temp file: {}", e);
-        // Continue — we will still try to pass the JSON directly as fallback (but risk long cmd)
     }
 
-    // Build command to call Python analyzer; pass history as @<tempfile>
     let mut command = Command::new(&python_bin);
     command.arg(&analyzer_path);
     command.arg(csv_path.clone());
     command.arg(query.clone());
 
-    // Pass history as @tempfile path to avoid long command line
     let history_arg = format!("@{}", tmp_path.to_string_lossy());
     command.arg(history_arg);
 
-    // Require GROQ_API_KEY in environment rather than hardcoding
-    let api_key = "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";
-    command.env("GROQ_API_KEY", api_key);
-
-    // Also pass other environment variables
-    command.env("PYTHONUTF8", "1"); // Ensure UTF-8 encoding
+    command.env("GROQ_API_KEY", &api_key);
+    command.env("PYTHONUTF8", "1");
     command.env("PYTHONIOENCODING", "utf-8");
 
     #[cfg(target_os = "windows")]
@@ -450,7 +532,6 @@ async fn analyze_query(
     let output = command.output()
         .map_err(|e| format!("Failed to execute Python: {}", e))?;
 
-    // Attempt to remove temp file (best-effort)
     if tmp_path.exists() {
         let _ = std::fs::remove_file(&tmp_path);
     }
@@ -466,23 +547,28 @@ async fn analyze_query(
 
     let response = parse_python_output(&stdout, &stderr);
 
-    // Add to history
-    chat_data.history.push(QueryHistory {
-        query: query.clone(),
-        response: response.clone(),
-        timestamp: chrono::Local::now().to_rfc3339(),
-    });
+    {
+        let current_chat = state.current_chat.lock().unwrap();
+        let mut chats = state.chats.lock().unwrap();
+        
+        if let Some(chat_data) = chats.get_mut(&*current_chat) {
+            chat_data.history.push(QueryHistory {
+                query: query.clone(),
+                response: response.clone(),
+                timestamp: chrono::Local::now().to_rfc3339(),
+            });
 
-    // Auto-save chat data (including history and CSV path)
-    let app_handle_clone = app_handle.clone();
-    let current_chat_clone = current_chat.clone();
-    let chat_data_clone = chat_data.clone();
+            let app_handle_clone = app_handle.clone();
+            let current_chat_clone = current_chat.clone();
+            let chat_data_clone = chat_data.clone();
 
-    tauri::async_runtime::spawn_blocking(move || {
-        if let Err(e) = save_chat_data_blocking(&app_handle_clone, &current_chat_clone, &chat_data_clone) {
-            eprintln!("Warning: Could not save chat data: {}", e);
+            tauri::async_runtime::spawn_blocking(move || {
+                if let Err(e) = save_chat_data_blocking(&app_handle_clone, &current_chat_clone, &chat_data_clone) {
+                    eprintln!("Warning: Could not save chat data: {}", e);
+                }
+            });
         }
-    });
+    }
 
     Ok(response)
 }
@@ -492,25 +578,21 @@ async fn load_csv_info(app_handle: tauri::AppHandle, csv_path: String) -> Result
     use std::path::Path;
     use std::process::Command;
 
-    // Get the path to the Python executable
     let (python_bin, _) = get_python_paths(&app_handle)
         .map_err(|e| format!("Failed to get Python paths: {}", e))?;
 
-    // Determine file extension (case-insensitive)
     let ext = Path::new(&csv_path)
         .extension()
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_lowercase();
 
-    // Choose how to load based on extension
     let read_cmd = match ext.as_str() {
         "csv" => format!("pd.read_csv(r'{}')", csv_path),
         "xlsx" | "xls" => format!("pd.read_excel(r'{}')", csv_path),
         _ => return Err(format!("Unsupported file type: .{}", ext)),
     };
 
-    // Python code that dynamically reads CSV or Excel
     let python_code = format!(r#"
 import pandas as pd
 import json
@@ -525,14 +607,12 @@ except Exception as e:
     sys.exit(1)
 "#, read_cmd);
 
-    // Run Python
     let output = Command::new(&python_bin)
         .arg("-c")
         .arg(python_code)
         .output()
         .map_err(|e| format!("Failed to run Python: {}", e))?;
 
-    // Check for Python-side errors
     if !output.status.success() {
         return Err(format!(
             "Python error: {}",
@@ -540,27 +620,22 @@ except Exception as e:
         ));
     }
 
-    // Parse JSON back into Vec<Vec<String>>
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     serde_json::from_str(&stdout)
         .map_err(|e| format!("Failed to parse JSON output: {}", e))
 }
 
-// Helper function to get Python paths
 fn get_python_paths(app_handle: &AppHandle) -> Result<(String, String), String> {
     let resource_dir = app_handle.path()
         .resource_dir()
         .map_err(|e| format!("Failed to get resource directory: {}", e))?;
 
-    // In development, the Python files are in src-tauri/python/
-    // In production, they're in the resources directory
     let python_dir = resource_dir.join("python");
     
     if !python_dir.exists() {
         return Err("Python directory not found in resources".to_string());
     }
 
-    // First try to find Python in the virtual environment
     let venv_python_bin = if cfg!(target_os = "windows") {
         python_dir.join("venv/Scripts/python.exe")
     } else {
@@ -573,23 +648,18 @@ fn get_python_paths(app_handle: &AppHandle) -> Result<(String, String), String> 
         return Err(format!("Analyzer script not found at: {:?}", analyzer_path));
     }
 
-    // Check if venv Python exists, if not fall back to system Python
     let python_bin = if venv_python_bin.exists() {
         venv_python_bin.to_string_lossy().to_string()
     } else {
         println!("Virtual environment Python not found at {:?}, falling back to system Python", venv_python_bin);
         
-        // Try to find system Python
         if cfg!(target_os = "windows") {
-            // On Windows, try common Python locations and commands
             find_system_python().map_err(|e| format!("Failed to find system Python: {}", e))?
         } else {
-            // On Unix-like systems, try 'python3' or 'python'
             "python3".to_string()
         }
     };
 
-    // Verify the Python command works
     if !verify_python_command(&python_bin) {
         return Err(format!("Python command '{}' is not working. Please ensure Python is installed and in your PATH.", python_bin));
     }
@@ -597,9 +667,7 @@ fn get_python_paths(app_handle: &AppHandle) -> Result<(String, String), String> 
     Ok((python_bin, analyzer_path.to_string_lossy().to_string()))
 }
 
-// Helper function to find system Python on Windows
 fn find_system_python() -> Result<String, String> {
-    // Try different Python commands in order of preference
     let commands = ["python", "python3", "py"];
     
     for cmd in commands.iter() {
@@ -609,7 +677,6 @@ fn find_system_python() -> Result<String, String> {
         }
     }
     
-    // If no command works, try to find Python in common installation directories
     if let Some(install_path) = find_python_in_program_files() {
         println!("Found Python installation at: {}", install_path);
         return Ok(install_path);
@@ -618,7 +685,6 @@ fn find_system_python() -> Result<String, String> {
     Err("Could not find a working Python installation. Please install Python and ensure it's in your PATH.".to_string())
 }
 
-// Helper function to verify if a Python command works
 fn verify_python_command(command: &str) -> bool {
     let output = Command::new(command)
         .arg("--version")
@@ -630,7 +696,6 @@ fn verify_python_command(command: &str) -> bool {
     }
 }
 
-// Helper function to find Python in Windows Program Files directories
 fn find_python_in_program_files() -> Option<String> {
     let possible_paths = [
         r"C:\Program Files\Python311\python.exe",
@@ -648,7 +713,6 @@ fn find_python_in_program_files() -> Option<String> {
     ];
 
     for path_pattern in possible_paths.iter() {
-        // Handle paths with wildcards for user directories
         if path_pattern.contains('*') {
             if let Some(home_dir) = dirs::home_dir() {
                 let path = path_pattern.replace('*', &home_dir.to_string_lossy());
@@ -664,7 +728,6 @@ fn find_python_in_program_files() -> Option<String> {
     None
 }
 
-// Helper function to get just the analyzer path
 fn get_python_analyzer_path(app_handle: &AppHandle) -> Result<String, String> {
     let resource_dir = app_handle.path()
         .resource_dir()
@@ -699,7 +762,6 @@ fn parse_python_output(stdout_raw: &str, stderr_raw: &str) -> AnalysisResponse {
         response.error = Some(stderr.to_string());
     }
 
-    // Helper function to extract section safely with new markers
     fn extract_section(s: &str, start_marker: &str, end_marker: &str) -> String {
         if let Some(start) = s.find(start_marker) {
             let s = &s[start + start_marker.len()..];
@@ -710,10 +772,8 @@ fn parse_python_output(stdout_raw: &str, stderr_raw: &str) -> AnalysisResponse {
         String::new()
     }
 
-    // Extract sections using new consistent markers
     response.summary = extract_section(&stdout, "=== ANALYSIS_SUMMARY_START ===", "=== ANALYSIS_SUMMARY_END ===");
     
-    // Extract recommended prompts
     let prompts_text = extract_section(&stdout, "=== RECOMMENDED_PROMPTS_START ===", "=== RECOMMENDED_PROMPTS_END ===");
     if !prompts_text.is_empty() {
         if let Ok(prompts) = serde_json::from_str::<Vec<String>>(&prompts_text) {
@@ -721,7 +781,6 @@ fn parse_python_output(stdout_raw: &str, stderr_raw: &str) -> AnalysisResponse {
         }
     }
     
-    // Extract Mimir recommends
     let mimir_text = extract_section(&stdout, "=== MIMIR_RECOMMENDS_START ===", "=== MIMIR_RECOMMENDS_END ===");
     if !mimir_text.is_empty() {
         if let Ok(recommends) = serde_json::from_str::<Vec<String>>(&mimir_text) {
@@ -729,13 +788,11 @@ fn parse_python_output(stdout_raw: &str, stderr_raw: &str) -> AnalysisResponse {
         }
     }
     
-    // Extract chart data
     let chart_text = extract_section(&stdout, "=== CHART_DATA_START ===", "=== CHART_DATA_END ===");
     if !chart_text.is_empty() && chart_text != "null" {
         response.chart = Some(chart_text);
     }
     
-    // Extract error info
     let error_text = extract_section(&stdout, "=== ERROR_INFO_START ===", "=== ERROR_INFO_END ===");
     if !error_text.is_empty() {
         response.error = Some(error_text);
@@ -744,9 +801,177 @@ fn parse_python_output(stdout_raw: &str, stderr_raw: &str) -> AnalysisResponse {
     response
 }
 
+// ========== AUTH COMMANDS ==========
+
+#[tauri::command]
+async fn login(
+    login_info: LoginInfo, 
+    state: State<'_, AppState>, 
+    save_login_boolean: bool, 
+    app_handle: AppHandle
+) -> Result<String, String> {
+    let api_route = "http://localhost:8080";
+
+    let client = reqwest::Client::new();
+    
+    let response = client
+        .post(format!("{}/api/auth/login", api_route))
+        .json(&login_info)
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {}", e))?;
+    
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_body = response.text().await.unwrap_or_default();
+        return Err(format!("HTTP {}: {}", status, error_body));
+    }
+    
+    let response_text = response.text()
+        .await
+        .map_err(|e| format!("Failed to read response: {}", e))?;
+
+    println!("=== RAW LOGIN RESPONSE ===");
+    println!("{}", response_text);
+    println!("==========================");
+
+    let login_response: LoginResponse = serde_json::from_str(&response_text)
+        .map_err(|e| format!("Failed to parse login response: {} | Raw response: {}", e, response_text))?;
+
+    let mut token_guard = state.jwt_token.lock().unwrap();
+    *token_guard = login_response.access_token.clone();
+
+    let refresh_token = RefreshToken {
+        refresh_token: login_response.refresh_token.clone()
+    };
+
+    if save_login_boolean {
+        if let Err(e) = save_login(&app_handle, &refresh_token) {
+            println!("Warning: Failed to save login info: {}", e);
+        } else {
+            println!("Login info saved successfully");
+        }
+    }
+
+    Ok(login_response.username)
+}
+
+#[tauri::command]
+async fn refresh_token(
+    refresh_token: String,
+    state: State<'_, AppState>,
+    app_handle: AppHandle
+) -> Result<String, String> {
+    let api_route = "http://localhost:8080";
+
+    let client = reqwest::Client::new();
+    
+    let response = client
+        .post(format!("{}/api/auth/refresh", api_route))
+        .json(&RefreshToken { refresh_token })
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {}", e))?;
+    
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_body = response.text().await.unwrap_or_default();
+        return Err(format!("HTTP {}: {}", status, error_body));
+    }
+    
+    let response_text = response.text()
+        .await
+        .map_err(|e| format!("Failed to read response: {}", e))?;
+
+    println!("=== RAW REFRESH RESPONSE ===");
+    println!("{}", response_text);
+    println!("============================");
+
+    let login_response: LoginResponse = serde_json::from_str(&response_text)
+        .map_err(|e| format!("Failed to parse refresh response: {} | Raw response: {}", e, response_text))?;
+
+    let mut token_guard = state.jwt_token.lock().unwrap();
+    *token_guard = login_response.access_token.clone();
+
+    let new_refresh_token = RefreshToken {
+        refresh_token: login_response.refresh_token.clone()
+    };
+    
+    if let Err(e) = save_login(&app_handle, &new_refresh_token) {
+        println!("Warning: Failed to save new refresh token: {}", e);
+    }
+
+    Ok(login_response.username)
+}
+
+#[tauri::command]
+async fn try_auto_login(
+    app_handle: AppHandle,
+    state: State<'_, AppState>
+) -> Result<String, String> {
+    let refresh_token_data = load_login(&app_handle)
+        .map_err(|_| "No saved login found".to_string())?;
+    
+    refresh_token(refresh_token_data.refresh_token, state, app_handle).await
+}
+
+#[tauri::command]
+async fn logout(
+    app_handle: AppHandle,
+    state: State<'_, AppState>
+) -> Result<String, String> {
+    let mut token_guard = state.jwt_token.lock().unwrap();
+    *token_guard = String::new();
+    
+    let app_dir = app_handle.path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    
+    let login_path = app_dir.join("logininfo.json");
+    
+    if login_path.exists() {
+        std::fs::remove_file(&login_path)
+            .map_err(|e| format!("Failed to delete login info: {}", e))?;
+    }
+    
+    Ok("Logged out successfully".to_string())
+}
+
+#[tauri::command]
+async fn request_password_reset(
+    app_handle: AppHandle,
+    email: String) -> Result<String, String> {
+
+    log_to_frontend(&app_handle, &email);
+    let api_route = "http://localhost:8080";
+
+    let client = reqwest::Client::new();
+    
+    let json_body = serde_json::json!({
+        "email": email
+    }); 
+    let response = client
+        .post(format!("{}/api/auth/request-reset", api_route))
+        .json(&json_body)
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {}", e))?;
+    
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_body = response.text().await.unwrap_or_default();
+        return Err(format!("HTTP {}: {}", status, error_body));
+    }
+    
+    let response_text = response.text()
+        .await
+        .map_err(|e| format!("Failed to read response: {}", e))?;
+
+    Ok(response_text)
+}
+
 fn main() {
-    // Don't need to load .env files since we're hardcoding the API key
-    println!("Starting app with hardcoded API key");
+    println!("Starting Mimir application");
 
     tauri::Builder::default()
         .manage(AppState::default())
@@ -755,7 +980,6 @@ fn main() {
             let app_handle = app.handle();
             let state = app_handle.state::<AppState>();
             
-            // Initialize with a default chat
             let mut chats = state.chats.lock().unwrap();
             chats.insert("default".to_string(), ChatData {
                 history: Vec::new(),
@@ -767,7 +991,6 @@ fn main() {
             *current_chat = "default".to_string();
             drop(current_chat);
             
-            // Try to load existing chats
             if let Err(e) = load_chats_sync(&app_handle, state) {
                 println!("Could not load existing chats: {}", e);
             }
@@ -775,27 +998,25 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            // Chat management
             create_chat,
             switch_chat,
             get_current_chat,
             list_chats,
             delete_chat,
-            
-            // CSV path management
             set_csv_path,
             get_csv_path,
-            
-            // History management
             clear_history,
             get_history,
             save_history,
-            
-            // Python service
             start_python_service,
             stop_python_service,
             analyze_query,
             load_csv_info,
+            login,
+            logout,
+            refresh_token,
+            try_auto_login,
+            request_password_reset,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -813,7 +1034,6 @@ fn load_chats_sync(app_handle: &tauri::AppHandle, state: tauri::State<'_, AppSta
     let mut chats = state.chats.lock().unwrap();
     let mut current_chat = state.current_chat.lock().unwrap();
     
-    // Read all JSON files in the app data directory
     for entry in std::fs::read_dir(&app_dir)
         .map_err(|e| format!("Failed to read app directory: {}", e))? 
     {
@@ -821,21 +1041,25 @@ fn load_chats_sync(app_handle: &tauri::AppHandle, state: tauri::State<'_, AppSta
         let path = entry.path();
         
         if path.extension().map_or(false, |ext| ext == "json") {
-            if let Some(chat_name) = path.file_stem().and_then(|s| s.to_str()) {
-                match load_chat_data_blocking(app_handle, chat_name) {
+            if let Some(file_name) = path.file_stem().and_then(|s| s.to_str()) {
+                // Skip logininfo.json
+                if file_name == "logininfo" {
+                    continue;
+                }
+                
+                match load_chat_data_blocking(app_handle, file_name) {
                     Ok(chat_data) => {
-                        chats.insert(chat_name.to_string(), chat_data);
-                        println!("Loaded chat '{}'", chat_name);
+                        chats.insert(file_name.to_string(), chat_data);
+                        println!("Loaded chat '{}'", file_name);
                     }
                     Err(e) => {
-                        println!("Failed to load chat '{}': {}", chat_name, e);
+                        println!("Failed to load chat '{}': {}", file_name, e);
                     }
                 }
             }
         }
     }
     
-    // Set current chat to the first available chat, or keep "default"
     if !chats.is_empty() && !chats.contains_key(&*current_chat) {
         if let Some(first_chat) = chats.keys().next() {
             *current_chat = first_chat.clone();

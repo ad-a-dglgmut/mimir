@@ -23,6 +23,9 @@ import {
   FileDown,
   Moon,
   Sun,
+  LogOut,
+  User,
+  Key,
 } from "lucide-react"
 import { Window } from "@tauri-apps/api/window"
 import { invoke } from "@tauri-apps/api/core"
@@ -62,6 +65,24 @@ interface ChatInfo {
 }
 
 export default function MimirApp() {
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false)
+  const [isCheckingAuth, setIsCheckingAuth] = useState<boolean>(true)
+  const [username, setUsername] = useState<string>("")
+  
+  // Login form state
+  const [loginUsername, setLoginUsername] = useState<string>("")
+  const [loginPassword, setLoginPassword] = useState<string>("")
+  const [rememberMe, setRememberMe] = useState<boolean>(true)
+  const [loginError, setLoginError] = useState<string>("")
+  const [isLoggingIn, setIsLoggingIn] = useState<boolean>(false)
+
+  // Forgot password state
+  const [showForgotPassword, setShowForgotPassword] = useState<boolean>(false)
+  const [resetEmail, setResetEmail] = useState<string>("")
+  const [isResetting, setIsResetting] = useState<boolean>(false)
+  const [resetMessage, setResetMessage] = useState<string>("")
+  const [resetError, setResetError] = useState<string>("")
+
   const [csvPath, setCsvPath] = useState<string>("")
   const [fileName, setFileName] = useState<string>("")
   const [query, setQuery] = useState<string>("")
@@ -92,11 +113,109 @@ export default function MimirApp() {
     document.documentElement.classList.toggle("light", theme === "light")
   }, [theme])
 
+  // Check for auto-login on mount
   useEffect(() => {
-    loadCurrentChat()
-    loadChatList()
-    loadGlobalRecommendedPrompts()
+    checkAutoLogin()
   }, [])
+
+  // Load data when authenticated
+  useEffect(() => {
+    if (isAuthenticated) {
+      loadCurrentChat()
+      loadChatList()
+      loadGlobalRecommendedPrompts()
+    }
+  }, [isAuthenticated])
+
+  const checkAutoLogin = async () => {
+    setIsCheckingAuth(true)
+    try {
+      const result = await invoke<string>("try_auto_login")
+      console.log("Auto-login successful:", result)
+      setUsername(result)
+      setIsAuthenticated(true)
+    } catch (err) {
+      console.log("No auto-login available:", err)
+      setIsAuthenticated(false)
+    } finally {
+      setIsCheckingAuth(false)
+    }
+  }
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setLoginError("")
+    setIsLoggingIn(true)
+
+    try {
+      const result = await invoke<string>("login", {
+        loginInfo: {
+          username: loginUsername,
+          password: loginPassword,
+        },
+        saveLoginBoolean: rememberMe,
+      })
+      
+      console.log("Login successful:", result)
+      setUsername(result)
+      setIsAuthenticated(true)
+      
+      // Reset login form
+      setLoginUsername("")
+      setLoginPassword("")
+    } catch (err) {
+      console.error("Login error:", err)
+      setLoginError(err as string)
+    } finally {
+      setIsLoggingIn(false)
+    }
+  }
+
+const handleForgotPassword = async (e: React.FormEvent) => {
+  e.preventDefault()
+  if (!resetEmail.trim()) {
+    setResetError("Please enter your email address")
+    return
+  }
+
+  setIsResetting(true)
+  setResetError("")
+  setResetMessage("")
+
+  try {
+    // Use Tauri's invoke instead of fetch
+    const result = await invoke<string>("request_password_reset", {
+      email: resetEmail,
+    })
+    
+    setResetMessage("Password reset email sent. Please check your inbox.")
+    setResetEmail("")
+    setTimeout(() => {
+      setShowForgotPassword(false)
+      setResetMessage("")
+    }, 3000)
+  } catch (err) {
+    console.error("Password reset error:", err)
+    setResetError(err as string || "Failed to send reset email. Please try again.")
+  } finally {
+    setIsResetting(false)
+  }
+}
+
+  const handleLogout = async () => {
+    try {
+      await invoke("logout")
+      console.log("Logout successful")
+      setIsAuthenticated(false)
+      setUsername("")
+      setHistory([])
+      setChats([])
+      setCsvPath("")
+      setFileName("")
+    } catch (err) {
+      console.error("Logout error:", err)
+    }
+  }
 
   const loadGlobalRecommendedPrompts = async () => {
     const generalPrompts = [
@@ -224,57 +343,57 @@ export default function MimirApp() {
     }
   }, [])
 
-const handleAnalyze = async () => {
-  if (!query.trim()) return
-  if (!csvPath) {
-    alert("Please load a CSV file first")
-    return
-  }
-
-  setLoading(true)
-  try {
-    console.log("Invoking analyze_query with:", { csvPath, query })
-
-    const response = await invoke<AnalysisResponse>("analyze_query", {
-      csvPath,
-      query,
-    })
-
-    console.log("Got response from backend:", response)
-
-    const newItem: HistoryItem = {
-      id: Date.now(),
-      query,
-      response,
-      timestamp: new Date().toLocaleTimeString(),
-      showRecommendedPrompts: true,
+  const handleAnalyze = async () => {
+    if (!query.trim()) return
+    if (!csvPath) {
+      alert("Please load a CSV file first")
+      return
     }
 
-    setHistory((prev) => [newItem, ...prev])
-    setQuery("")
-    setTimeout(() => {
-      historyContainerRef.current?.scrollTo({ top: 0, behavior: "smooth" })
-    }, 100)
-  } catch (err) {
-    console.error("Analyze error:", err)
-    const errorItem: HistoryItem = {
-      id: Date.now(),
-      query,
-      response: {
-        error: (err as any)?.toString() ?? "Unknown error",
-        raw_output: "",
-        code: "",
-        result: "",
-        summary: "",
-      },
-      timestamp: new Date().toLocaleTimeString(),
-      showRecommendedPrompts: true,
+    setLoading(true)
+    try {
+      console.log("Invoking analyze_query with:", { csvPath, query })
+
+      const response = await invoke<AnalysisResponse>("analyze_query", {
+        csvPath,
+        query,
+      })
+
+      console.log("Got response from backend:", response)
+
+      const newItem: HistoryItem = {
+        id: Date.now(),
+        query,
+        response,
+        timestamp: new Date().toLocaleTimeString(),
+        showRecommendedPrompts: true,
+      }
+
+      setHistory((prev) => [newItem, ...prev])
+      setQuery("")
+      setTimeout(() => {
+        historyContainerRef.current?.scrollTo({ top: 0, behavior: "smooth" })
+      }, 100)
+    } catch (err) {
+      console.error("Analyze error:", err)
+      const errorItem: HistoryItem = {
+        id: Date.now(),
+        query,
+        response: {
+          error: (err as any)?.toString() ?? "Unknown error",
+          raw_output: "",
+          code: "",
+          result: "",
+          summary: "",
+        },
+        timestamp: new Date().toLocaleTimeString(),
+        showRecommendedPrompts: true,
+      }
+      setHistory((prev) => [errorItem, ...prev])
+    } finally {
+      setLoading(false)
     }
-    setHistory((prev) => [errorItem, ...prev])
-  } finally {
-    setLoading(false)
   }
-}
 
   const handlePromptClick = (prompt: string) => {
     setQuery(prompt)
@@ -303,7 +422,7 @@ const handleAnalyze = async () => {
     setIsDragging(false)
 
     const files = Array.from(e.dataTransfer.files)
-    const csvFile:any = files.find((file) => file.name.toLowerCase().endsWith(".csv"))
+    const csvFile: any = files.find((file) => file.name.toLowerCase().endsWith(".csv"))
 
     if (csvFile) {
       try {
@@ -604,7 +723,7 @@ const handleAnalyze = async () => {
         <div className="space-y-3">
           {recommendations.map((recommendation, index) => (
             <div key={index} className="flex items-start gap-3 p-3 bg-card rounded-lg border-2 border-border shadow-sm">
-              <div className="w-2 h-2 bg-primary rounded-full mt-2 flex-shrink-0 shadow-sm shadow-primary/50" />
+             <div className="w-2 h-2 bg-primary rounded-full mt-2 flex-shrink-0 shadow-sm shadow-primary/50" />
               <p className="text-sm text-foreground flex-1 break-words">{recommendation}</p>
             </div>
           ))}
@@ -613,6 +732,208 @@ const handleAnalyze = async () => {
     )
   }
 
+  // Show loading screen while checking auth
+  if (isCheckingAuth) {
+    return (
+      <div className={`min-h-screen bg-background animated-gradient flex items-center justify-center ${theme}`}>
+        <div className="text-center">
+          <Brain className="w-16 h-16 text-primary mx-auto mb-4 animate-pulse" />
+          <p className="text-foreground text-lg">Loading Mimir...</p>
+        </div>
+      </div>
+    )
+  }
+
+  // Show forgot password page
+  if (showForgotPassword) {
+    return (
+      <div className={`min-h-screen bg-background animated-gradient flex items-center justify-center p-4 ${theme}`}>
+        <div className="w-full max-w-md">
+          <div className="bg-card/95 backdrop-blur-sm border-2 border-border rounded-2xl p-8 shadow-2xl">
+            {/* Back to login */}
+            <button
+              onClick={() => setShowForgotPassword(false)}
+              className="flex items-center gap-2 text-muted-foreground hover:text-foreground mb-6 transition-colors"
+            >
+              <ChevronUp className="w-4 h-4 rotate-90" />
+              Back to login
+            </button>
+
+            {/* Logo and Title */}
+            <div className="text-center mb-8">
+              <Key className="w-16 h-16 text-primary mx-auto mb-4 drop-shadow-lg" />
+              <h1 className="text-3xl font-bold text-foreground mb-2">Reset Password</h1>
+              <p className="text-muted-foreground">Enter your email to receive a reset link</p>
+            </div>
+
+            {/* Reset Form */}
+            <form onSubmit={handleForgotPassword} className="space-y-4">
+              {resetError && (
+                <div className="bg-destructive/10 border-2 border-destructive/50 rounded-lg p-3 text-destructive text-sm">
+                  {resetError}
+                </div>
+              )}
+
+              {resetMessage && (
+                <div className="bg-primary/10 border-2 border-primary/50 rounded-lg p-3 text-primary text-sm">
+                  {resetMessage}
+                </div>
+              )}
+
+              <div>
+                <label htmlFor="email" className="block text-sm font-medium text-foreground mb-2">
+                  Email Address
+                </label>
+                <input
+                  id="email"
+                  type="email"
+                  value={resetEmail}
+                  onChange={(e) => setResetEmail(e.target.value)}
+                  className="w-full px-4 py-3 bg-input border-2 border-border rounded-lg focus:ring-2 focus:ring-primary focus:border-primary text-foreground placeholder:text-muted-foreground transition-all"
+                  placeholder="Enter your email address"
+                  required
+                  disabled={isResetting}
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={isResetting}
+                className="w-full py-3 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed font-bold transition-all shadow-lg hover:shadow-xl hover:scale-[1.02] active:scale-[0.98] flex items-center justify-center gap-2"
+              >
+                {isResetting ? (
+                  <>
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    Sending reset link...
+                  </>
+                ) : (
+                  <>
+                    <Key className="w-5 h-5" />
+                    Send Reset Link
+                  </>
+                )}
+              </button>
+            </form>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // Show login page if not authenticated
+  if (!isAuthenticated) {
+    return (
+      <div className={`min-h-screen bg-background animated-gradient flex items-center justify-center p-4 ${theme}`}>
+        <div className="w-full max-w-md">
+          <div className="bg-card/95 backdrop-blur-sm border-2 border-border rounded-2xl p-8 shadow-2xl">
+            {/* Logo and Title */}
+            <div className="text-center mb-8">
+              <Brain className="w-16 h-16 text-primary mx-auto mb-4 drop-shadow-lg" />
+              <h1 className="text-3xl font-bold text-foreground mb-2">Welcome to Mimir</h1>
+              <p className="text-muted-foreground">AI-Powered Data Analysis Assistant</p>
+            </div>
+
+            {/* Login Form */}
+            <form onSubmit={handleLogin} className="space-y-4">
+              {loginError && (
+                <div className="bg-destructive/10 border-2 border-destructive/50 rounded-lg p-3 text-destructive text-sm">
+                  {loginError}
+                </div>
+              )}
+
+              <div>
+                <label htmlFor="username" className="block text-sm font-medium text-foreground mb-2">
+                  Username
+                </label>
+                <input
+                  id="username"
+                  type="text"
+                  value={loginUsername}
+                  onChange={(e) => setLoginUsername(e.target.value)}
+                  className="w-full px-4 py-3 bg-input border-2 border-border rounded-lg focus:ring-2 focus:ring-primary focus:border-primary text-foreground placeholder:text-muted-foreground transition-all"
+                  placeholder="Enter your username"
+                  required
+                  disabled={isLoggingIn}
+                />
+              </div>
+
+              <div>
+                <label htmlFor="password" className="block text-sm font-medium text-foreground mb-2">
+                  Password
+                </label>
+                <input
+                  id="password"
+                  type="password"
+                  value={loginPassword}
+                  onChange={(e) => setLoginPassword(e.target.value)}
+                  className="w-full px-4 py-3 bg-input border-2 border-border rounded-lg focus:ring-2 focus:ring-primary focus:border-primary text-foreground placeholder:text-muted-foreground transition-all"
+                  placeholder="Enter your password"
+                  required
+                  disabled={isLoggingIn}
+                />
+              </div>
+
+              <div className="flex items-center justify-between">
+                <div className="flex items-center">
+                  <input
+                    id="remember"
+                    type="checkbox"
+                    checked={rememberMe}
+                    onChange={(e) => setRememberMe(e.target.checked)}
+                    className="w-4 h-4 text-primary bg-input border-border rounded focus:ring-2 focus:ring-primary"
+                    disabled={isLoggingIn}
+                  />
+                  <label htmlFor="remember" className="ml-2 text-sm text-foreground">
+                    Remember me
+                  </label>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setShowForgotPassword(true)}
+                  className="text-sm text-primary hover:text-primary/80 transition-colors"
+                  disabled={isLoggingIn}
+                >
+                  Forgot password?
+                </button>
+              </div>
+
+              <button
+                type="submit"
+                disabled={isLoggingIn}
+                className="w-full py-3 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed font-bold transition-all shadow-lg hover:shadow-xl hover:scale-[1.02] active:scale-[0.98] flex items-center justify-center gap-2"
+              >
+                {isLoggingIn ? (
+                  <>
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    Logging in...
+                  </>
+                ) : (
+                  <>
+                    <User className="w-5 h-5" />
+                    Login
+                  </>
+                )}
+              </button>
+            </form>
+
+            {/* Theme Toggle */}
+            <div className="mt-6 text-center">
+              <button
+                onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+                className="text-sm text-muted-foreground hover:text-foreground transition-colors inline-flex items-center gap-2"
+              >
+                {theme === "dark" ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+                Switch to {theme === "dark" ? "light" : "dark"} mode
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // Main authenticated app
   return (
     <div className={`min-h-screen bg-background animated-gradient flex overflow-hidden ${theme}`}>
       {/* Chat Sidebar */}
@@ -632,6 +953,23 @@ const handleAnalyze = async () => {
               >
                 <Plus className="w-5 h-5" />
               </button>
+            </div>
+
+            {/* User Info */}
+            <div className="bg-primary/15 border-2 border-primary/40 p-3 rounded-xl shadow-md mb-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2 min-w-0">
+                  <User className="w-4 h-4 text-primary flex-shrink-0" />
+                  <span className="text-sm font-medium text-sidebar-foreground truncate">{username}</span>
+                </div>
+                <button
+                  onClick={handleLogout}
+                  className="p-1.5 text-sidebar-foreground/60 hover:text-destructive transition-colors cursor-pointer"
+                  title="Logout"
+                >
+                  <LogOut className="w-4 h-4" />
+                </button>
+              </div>
             </div>
 
             {/* Current Chat Info */}
@@ -777,7 +1115,7 @@ const handleAnalyze = async () => {
                   className={`w-12 h-12 text-primary mb-4 transition-transform ${isDragging ? "scale-110" : ""}`}
                 />
                 <p className="text-foreground font-semibold text-lg mb-2">Drop your CSV or Excel file here</p>
-                <p className="text-muted-foreground/70 text-xs mt-2">Supports .csv, .xls and .xlts files</p>
+                <p className="text-muted-foreground/70 text-xs mt-2">Supports .csv, .xls and .xlsx files</p>
               </div>
 
               {/* Current file info */}
