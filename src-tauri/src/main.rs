@@ -1018,6 +1018,7 @@ fn main() {
             try_auto_login,
             request_password_reset,
         ])
+        .plugin(tauri_plugin_updater::init())
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -32,6 +32,7 @@ import { invoke } from "@tauri-apps/api/core"
 import { listen } from "@tauri-apps/api/event"
 import "./App.css"
 import { Drawer, DrawerContent, DrawerHeader, DrawerFooter, DrawerTitle } from "./components/ui/drawer"
+import { useUpdater } from "./lib/useUpdater"
 
 interface AnalysisResponse {
   raw_output: string
@@ -103,6 +104,7 @@ export default function MimirApp() {
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const historyContainerRef = useRef<HTMLDivElement>(null)
+  const { updateAvailable, updateInfo, runUpdate } = useUpdater()
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -935,7 +937,23 @@ const handleForgotPassword = async (e: React.FormEvent) => {
 
   // Main authenticated app
   return (
+
     <div className={`min-h-screen bg-background animated-gradient flex overflow-hidden ${theme}`}>
+      {updateAvailable && (
+        <div className="fixed bottom-4 right-4 bg-primary/90 p-4 rounded-xl shadow-lg flex flex-col sm:flex-row items-center gap-4 z-50">
+          <span className="text-primary-foreground font-bold">
+            Update available: {updateInfo?.version}
+          </span>
+        <button
+          onClick={runUpdate}
+          className="px-4 py-2 bg-primary-foreground text-primary rounded-lg font-semibold hover:bg-primary/80 transition-all"
+        >
+          Update Now
+        </button>
+    </div>
+)}
+
+
       {/* Chat Sidebar */}
       <Drawer open={showChatSidebar} onOpenChange={setShowChatSidebar} direction="left">
         <DrawerContent className="w-80 bg-sidebar/95 backdrop-blur-sm border-r-2 border-sidebar-border">
