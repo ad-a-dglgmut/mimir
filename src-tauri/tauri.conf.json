@@ -24,6 +24,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -36,14 +37,12 @@
       "python/**/*"
     ]
   },
-  "tauri": {
+  "plugins": {
     "updater": {
-      "active": true,
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDdDOTZBMzk3NUFBN0IzQjYKUldTMnM2ZGFsNk9XZkVFdW5IeFlPeWt4VVNRaktrdnhaMzhBekVPQnNqRVRBV2NxL2JScDJWeS8K",
       "endpoints": [
         "https://mimir-updates.s3.eu-north-1.amazonaws.com/latest.json"
-      ],
-      "dialog": true,
-      "pubkey": "keys/tauri.pub"
+      ]
     }
   }
 }

@@ -32,7 +32,8 @@ import { invoke } from "@tauri-apps/api/core"
 import { listen } from "@tauri-apps/api/event"
 import "./App.css"
 import { Drawer, DrawerContent, DrawerHeader, DrawerFooter, DrawerTitle } from "./components/ui/drawer"
-import { useUpdater } from "./lib/useUpdater"
+import { check } from "@tauri-apps/plugin-updater";
+import type { Update } from "@tauri-apps/plugin-updater";
 
 interface AnalysisResponse {
   raw_output: string
@@ -104,7 +105,42 @@ export default function MimirApp() {
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const historyContainerRef = useRef<HTMLDivElement>(null)
-  const { updateAvailable, updateInfo, runUpdate } = useUpdater()
+  const [updateInfo, setUpdateInfo] = useState<Update | null>(null);
+  const [updating, setUpdating] = useState(false);
+
+useEffect(() => {
+  async function checkForUpdates() {
+      try {
+        const update = await check();
+
+        // New API: update !== null means update exists
+        if (update !== null) {
+          setUpdateInfo(update);
+        }
+      } catch (err) {
+        console.error("Update check failed:", err);
+      }
+    }
+
+
+    checkForUpdates();
+  }, []);
+
+async function performUpdate() {
+  if (!updateInfo) return;
+  setUpdating(true);
+
+  try {
+    await updateInfo.downloadAndInstall((event) => {
+      if (event.event === "Progress") {
+        console.log("Downloaded chunk:", event.data.chunkLength);
+        // Cannot compute percentage reliably
+      }
+    });
+  } catch (err) {
+    console.error("Update failed:", err);
+  }
+}
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -939,20 +975,28 @@ const handleForgotPassword = async (e: React.FormEvent) => {
   return (
 
     <div className={`min-h-screen bg-background animated-gradient flex overflow-hidden ${theme}`}>
-      {updateAvailable && (
-        <div className="fixed bottom-4 right-4 bg-primary/90 p-4 rounded-xl shadow-lg flex flex-col sm:flex-row items-center gap-4 z-50">
-          <span className="text-primary-foreground font-bold">
-            Update available: {updateInfo?.version}
-          </span>
-        <button
-          onClick={runUpdate}
-          className="px-4 py-2 bg-primary-foreground text-primary rounded-lg font-semibold hover:bg-primary/80 transition-all"
-        >
-          Update Now
-        </button>
-    </div>
-)}
+      {updateInfo && !updating && (
+        <div className="w-full bg-blue-600 text-white p-3 flex justify-between items-center shadow-lg">
+          <span>New update available: <b>{updateInfo.version}</b></span>
+          <button
+            onClick={performUpdate}
+            className="px-3 py-1 bg-blue-800 rounded-lg hover:bg-blue-700 transition"
+          >
+            Install
+          </button>
+        </div>
+      )}
 
+      {updating && (
+        <div className="w-full bg-blue-600 text-white p-3 shadow-lg">
+            <div className="text-sm mb-1">Installing update…</div>
+            <div className="w-full bg-blue-900 h-2 rounded-full overflow-hidden">
+            <div className="bg-white h-2 animate-pulse" />
+          </div>
+        </div>
+      )}
+
+      {/* Your existing UI continues below */}
 
       {/* Chat Sidebar */}
       <Drawer open={showChatSidebar} onOpenChange={setShowChatSidebar} direction="left">
