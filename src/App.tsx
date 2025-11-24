@@ -222,6 +222,7 @@ const handleForgotPassword = async (e: React.FormEvent) => {
 
   try {
     // Use Tauri's invoke instead of fetch
+    //@ts-ignore
     const result = await invoke<string>("request_password_reset", {
       email: resetEmail,
     })
