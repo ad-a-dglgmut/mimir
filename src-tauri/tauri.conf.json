@@ -17,9 +17,6 @@
         "height": 600
       }
     ],
-    "macOS": {
-      "useSecureKeyboardEntry": true
-    },
     "security": {
       "csp": null
     }
@@ -38,25 +35,7 @@
     "resources": [
       "keys/tauri.pub",
       "python/**/*"
-    ],
-    "windows": {
-      "certificateThumbprint": null,
-      "digestAlgorithm": "sha256",
-      "timestampUrl": ""
-    },
-    "macOS": {
-      "frameworks": [],
-      "minimumSystemVersion": "",
-      "exceptionDomain": "",
-      "providerShortName": null,
-      "signing": {
-        "appleCert": "",
-        "appleCertPassword": "",
-        "appleId": "",
-        "appleTeamId": "",
-        "appleSigningIdentity": ""
-      }
-    }
+    ]
   },
   "plugins": {
     "updater": {
