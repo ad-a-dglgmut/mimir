@@ -39,7 +39,7 @@ async function uploadFile(filePath) {
     Bucket: bucket,
     Key: key,
     Body: fileContent,
-    ACL: "public-read",
+    // REMOVED: ACL: "public-read" - Bucket has ACLs disabled
   });
   
   await s3.send(command);
@@ -75,7 +75,7 @@ async function main() {
     Key: "latest.json",
     Body: latestJsonContent,
     ContentType: "application/json",
-    ACL: "public-read",
+    // REMOVED: ACL: "public-read" - Bucket has ACLs disabled
   });
   await s3.send(latestJsonCommand);
 
