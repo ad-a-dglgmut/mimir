@@ -12,11 +12,14 @@
   "app": {
     "windows": [
       {
-        "title": "mimir_v2",
+        "title": "mimir",
         "width": 800,
         "height": 600
       }
     ],
+    "macOS": {
+      "useSecureKeyboardEntry": true
+    },
     "security": {
       "csp": null
     }
@@ -35,14 +38,35 @@
     "resources": [
       "keys/tauri.pub",
       "python/**/*"
-    ]
+    ],
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": ""
+    },
+    "macOS": {
+      "frameworks": [],
+      "minimumSystemVersion": "",
+      "exceptionDomain": "",
+      "providerShortName": null,
+      "signing": {
+        "appleCert": "",
+        "appleCertPassword": "",
+        "appleId": "",
+        "appleTeamId": "",
+        "appleSigningIdentity": ""
+      }
+    }
   },
   "plugins": {
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDgzNkVCRkVGRDJGNTQ1OApSV1JZVkMvOS91czJDRjcyZlovSUJ0b1pXLzZMdWNxTnYxQjE1aUt5UHIrSm1JSUhpQkRZL0FaWgo=",
       "endpoints": [
-        "https://mimir-updates.s3.eu-north-1.amazonaws.com/latest.json"
-      ]
+        "https://mimir-updates.s3.eu-north-1.amazonaws.com/updates/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }
