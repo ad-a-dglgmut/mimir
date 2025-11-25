@@ -85,40 +85,40 @@ jobs:
           name: windows-build
           path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/
 
-build-macos:
-  runs-on: macos-latest
-  steps:
-    - uses: actions/checkout@v4
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
 
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: 20
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
 
-    - name: Install JS dependencies
-      run: npm install
+      - name: Install JS dependencies
+        run: npm install
 
-    - name: Setup Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        targets: x86_64-apple-darwin
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
 
-    - name: Install Tauri CLI
-      run: cargo install tauri-cli
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli
 
-    - name: Build frontend
-      run: npm run build
+      - name: Build frontend
+        run: npm run build
 
-    - name: Build Tauri app (macOS) - Skip DMG
-      run: npm run tauri build -- --target x86_64-apple-darwin --bundles app
-      env:
-        TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      - name: Build Tauri app (macOS) - Skip DMG
+        run: npm run tauri build -- --target x86_64-apple-darwin --bundles app
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
 
-    - name: Upload macOS artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: macos-build
-        path: src-tauri/target/x86_64-apple-darwin/release/bundle/
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-build
+          path: src-tauri/target/x86_64-apple-darwin/release/bundle/
 
   upload-updates:
     runs-on: ubuntu-latest
