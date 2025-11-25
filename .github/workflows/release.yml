@@ -30,7 +30,10 @@ jobs:
           node-version: 20
 
       - name: Install JS dependencies
-        run: npm install
+        run: |
+          npm install
+          # Install the newer AWS SDK v3
+          npm install @aws-sdk/client-s3
 
       - name: Setup Rust
         uses: actions-rs/toolchain@v1
@@ -54,4 +57,4 @@ jobs:
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          VERSION: ${{ github.ref_name }}
+          GITHUB_REF: ${{ github.ref }}
