@@ -10,6 +10,9 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_updater;
 
+// Global API URL constant
+const API_BASE_URL: &str = "http://localhost:8080";
+
 fn log_to_frontend(app_handle: &AppHandle, message: &str) {
     if let Some(window) = app_handle.get_webview_window("main") {
         let _ = window.emit("backend-log", message);
@@ -48,8 +51,6 @@ struct LoginResponse {
 }
 
 async fn get_api_key(jwt_token: String) -> Result<String, String> {
-    let api_route = "http://localhost:8080";
-
     if jwt_token.is_empty() {
         return Err("No JWT token provided".to_string());
     }
@@ -59,7 +60,7 @@ async fn get_api_key(jwt_token: String) -> Result<String, String> {
         .map_err(|e| format!("Failed to build client: {}", e))?;
 
     let response = client
-        .get(format!("{}/api/", api_route))
+        .get(format!("{}/api/", API_BASE_URL))
         .header("Authorization", format!("Bearer {}", jwt_token))
         .send()
         .await
@@ -869,12 +870,10 @@ async fn login(
     save_login_boolean: bool,
     app_handle: AppHandle,
 ) -> Result<String, String> {
-    let api_route = "http://localhost:8080";
-
     let client = reqwest::Client::new();
 
     let response = client
-        .post(format!("{}/api/auth/login", api_route))
+        .post(format!("{}/api/auth/login", API_BASE_URL))
         .json(&login_info)
         .send()
         .await
@@ -926,12 +925,10 @@ async fn refresh_token(
     state: State<'_, AppState>,
     app_handle: AppHandle,
 ) -> Result<String, String> {
-    let api_route = "http://localhost:8080";
-
     let client = reqwest::Client::new();
 
     let response = client
-        .post(format!("{}/api/auth/refresh", api_route))
+        .post(format!("{}/api/auth/refresh", API_BASE_URL))
         .json(&RefreshToken { refresh_token })
         .send()
         .await
@@ -1007,15 +1004,13 @@ async fn logout(app_handle: AppHandle, state: State<'_, AppState>) -> Result<Str
 #[tauri::command]
 async fn request_password_reset(app_handle: AppHandle, email: String) -> Result<String, String> {
     log_to_frontend(&app_handle, &email);
-    let api_route = "http://localhost:8080";
-
     let client = reqwest::Client::new();
 
     let json_body = serde_json::json!({
         "email": email
     });
     let response = client
-        .post(format!("{}/api/auth/request-reset", api_route))
+        .post(format!("{}/api/auth/request-reset", API_BASE_URL))
         .json(&json_body)
         .send()
         .await

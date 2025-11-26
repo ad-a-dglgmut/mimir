@@ -107,24 +107,26 @@ export default function MimirApp() {
   const historyContainerRef = useRef<HTMLDivElement>(null)
   const [updateInfo, setUpdateInfo] = useState<Update | null>(null);
   const [updating, setUpdating] = useState(false);
+  const [showUpdateNotification, setShowUpdateNotification] = useState<boolean>(false);
 
 useEffect(() => {
   async function checkForUpdates() {
-      try {
-        const update = await check();
-
-        // New API: update !== null means update exists
-        if (update !== null) {
-          setUpdateInfo(update);
-        }
-      } catch (err) {
-        console.error("Update check failed:", err);
+    try {
+      const update = await check();
+      if (update !== null) {
+        setUpdateInfo(update);
+        setShowUpdateNotification(true);
       }
+    } catch (err) {
+      console.error("Update check failed:", err);
     }
+  }
+  checkForUpdates();
+}, []);
 
-
-    checkForUpdates();
-  }, []);
+const dismissUpdate = () => {
+  setShowUpdateNotification(false);
+};
 
 async function performUpdate() {
   if (!updateInfo) return;
@@ -976,26 +978,65 @@ const handleForgotPassword = async (e: React.FormEvent) => {
   return (
 
     <div className={`min-h-screen bg-background animated-gradient flex overflow-hidden ${theme}`}>
-      {updateInfo && !updating && (
-        <div className="w-full bg-blue-600 text-white p-3 flex justify-between items-center shadow-lg">
-          <span>New update available: <b>{updateInfo.version}</b></span>
+{showUpdateNotification && updateInfo && !updating && (
+  <div className="fixed top-4 right-4 w-80 bg-card border-2 border-primary/40 rounded-xl p-4 shadow-2xl shadow-primary/20 z-50 backdrop-blur-sm animate-in slide-in-from-right-full duration-500">
+    <div className="flex items-start gap-3">
+      <div className="flex-shrink-0 w-6 h-6 bg-primary rounded-full flex items-center justify-center">
+        <Sparkles className="w-3 h-3 text-primary-foreground" />
+      </div>
+      <div className="flex-1 min-w-0">
+        <h4 className="font-bold text-foreground text-sm mb-1">
+          Update Available! 🎉
+        </h4>
+        <p className="text-muted-foreground text-xs mb-3">
+          Version {updateInfo.version} is ready to install
+        </p>
+        <div className="flex gap-2">
           <button
             onClick={performUpdate}
-            className="px-3 py-1 bg-blue-800 rounded-lg hover:bg-blue-700 transition"
+            className="flex-1 py-2 bg-primary text-primary-foreground text-sm font-medium rounded-lg hover:bg-primary/90 transition-all shadow-md hover:shadow-lg flex items-center justify-center gap-2"
           >
-            Install
+            <Zap className="w-3 h-3" />
+            Install Now
+          </button>
+          <button
+            onClick={dismissUpdate}
+            className="px-3 py-2 text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition-all text-sm"
+          >
+            Later
           </button>
         </div>
-      )}
+      </div>
+      <button
+        onClick={dismissUpdate}
+        className="flex-shrink-0 w-5 h-5 text-muted-foreground hover:text-foreground hover:bg-accent rounded flex items-center justify-center transition-all"
+      >
+        <X className="w-3 h-3" />
+      </button>
+    </div>
+  </div>
+)}
 
-      {updating && (
-        <div className="w-full bg-blue-600 text-white p-3 shadow-lg">
-            <div className="text-sm mb-1">Installing update…</div>
-            <div className="w-full bg-blue-900 h-2 rounded-full overflow-hidden">
-            <div className="bg-white h-2 animate-pulse" />
-          </div>
+{updating && (
+  <div className="fixed top-4 right-4 w-80 bg-card border-2 border-primary/40 rounded-xl p-4 shadow-2xl shadow-primary/20 z-50 backdrop-blur-sm">
+    <div className="flex items-center gap-3">
+      <div className="flex-shrink-0">
+        <Loader2 className="w-5 h-5 text-primary animate-spin" />
+      </div>
+      <div className="flex-1 min-w-0">
+        <h4 className="font-bold text-foreground text-sm mb-1">
+          Installing Update...
+        </h4>
+        <p className="text-muted-foreground text-xs mb-2">
+          This will only take a moment
+        </p>
+        <div className="w-full bg-secondary rounded-full h-1.5">
+          <div className="bg-primary h-1.5 rounded-full animate-pulse" />
         </div>
-      )}
+      </div>
+    </div>
+  </div>
+)}
 
       {/* Your existing UI continues below */}
 
