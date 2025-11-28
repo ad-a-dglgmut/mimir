@@ -1227,6 +1227,8 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::default())
         .manage(PythonProcess::default())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
         .setup(|app| {
             let app_handle = app.handle();
             let state = app_handle.state::<AppState>();
@@ -1260,6 +1262,7 @@ fn main() {
             set_csv_path,
             get_csv_path,
             merge_multiple_files,
+
             clear_history,
             get_history,
             save_history,

@@ -25,6 +25,9 @@ import {
   LogOut,
   User,
   Key,
+  Download,
+  Image,
+  FileSpreadsheet,
 } from "lucide-react"
 import { Window } from "@tauri-apps/api/window"
 import { invoke } from "@tauri-apps/api/core"
@@ -85,6 +88,15 @@ interface ChatInfo {
   csv_path: any
 }
 
+interface ExportModalState {
+  isOpen: boolean;
+  type: 'png' | 'svg' | 'csv' | null;
+  dataUrl?: string;
+  chartJson?: string;
+  fileName?: string;
+  fileContent?: string;
+}
+
 // ========== MAIN COMPONENT ==========
 
 export default function MimirApp() {
@@ -93,21 +105,18 @@ export default function MimirApp() {
   const [isCheckingAuth, setIsCheckingAuth] = useState<boolean>(true)
   const [username, setUsername] = useState<string>("")
   
-  // Auth state
   const [loginUsername, setLoginUsername] = useState<string>("")
   const [loginPassword, setLoginPassword] = useState<string>("")
   const [rememberMe, setRememberMe] = useState<boolean>(true)
   const [loginError, setLoginError] = useState<string>("")
   const [isLoggingIn, setIsLoggingIn] = useState<boolean>(false)
 
-  // Forgot password state
   const [showForgotPassword, setShowForgotPassword] = useState<boolean>(false)
   const [resetEmail, setResetEmail] = useState<string>("")
   const [isResetting, setIsResetting] = useState<boolean>(false)
   const [resetMessage, setResetMessage] = useState<string>("")
   const [resetError, setResetError] = useState<string>("")
 
-  // App state
   const [csvPath, setCsvPath] = useState<string>("")
   const [fileName, setFileName] = useState<string>("")
   const [query, setQuery] = useState<string>("")
@@ -116,14 +125,12 @@ export default function MimirApp() {
   const [isDragging, setIsDragging] = useState<boolean>(false)
   const [theme, setTheme] = useState<"light" | "dark">("dark")
 
-  // Chat state
   const [chats, setChats] = useState<ChatInfo[]>([])
   const [currentChat, setCurrentChat] = useState<string>("default")
   const [showChatSidebar, setShowChatSidebar] = useState<boolean>(true)
   const [showNewChatModal, setShowNewChatModal] = useState<boolean>(false)
   const [newChatName, setNewChatName] = useState<string>("")
 
-  // File management state
   const [uploadedFiles, setUploadedFiles] = useState<FileInfo[]>([])
   const [showMergeModal, setShowMergeModal] = useState<boolean>(false)
   const [matchingColumns, setMatchingColumns] = useState<string[]>([])
@@ -132,13 +139,22 @@ export default function MimirApp() {
     filesToMerge: []
   })
 
-  // Update state
   const [globalRecommendedPrompts, setGlobalRecommendedPrompts] = useState<string[]>([])
+  const [exportModal, setExportModal] = useState<ExportModalState>({
+    isOpen: false,
+    type: null
+  })
+
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const historyContainerRef = useRef<HTMLDivElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const [updateInfo, setUpdateInfo] = useState<Update | null>(null)
   const [updating, setUpdating] = useState(false)
   const [showUpdateNotification, setShowUpdateNotification] = useState<boolean>(false)
+
+  // ========== LOGO CONFIG ==========
+  const logoPath = theme === "dark" ? "../src-tauri/icons/logo_notext.png" : "../src-tauri/icons/logo_notext_light.png"
+  const iconPath = theme === "dark" ? "../src-tauri/icons/logo_notext.png" : "../src-tauri/icons/logo_notext_light.png"
 
   // ========== USE EFFECTS ==========
 
@@ -152,7 +168,6 @@ export default function MimirApp() {
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark")
-    document.documentElement.classList.toggle("light", theme === "light")
   }, [theme])
 
   useEffect(() => {
@@ -169,7 +184,7 @@ export default function MimirApp() {
 
   useEffect(() => {
     const unlisten = listen("backend-log", (event) => {
-      console.log("Backend says:", event.payload)
+      console.log("Backend log:", event.payload)
     })
 
     return () => {
@@ -229,19 +244,7 @@ export default function MimirApp() {
     setUpdating(true)
 
     try {
-      let totalDownloaded = 0
-      let lastLoggedSize = 0
-      
-      await updateInfo.downloadAndInstall((event) => {
-        if (event.event === "Progress") {
-          totalDownloaded += event.data.chunkLength
-          if (totalDownloaded - lastLoggedSize >= 64 * 1024) {
-            console.log(`Downloaded: ${(totalDownloaded / (1024 * 1024)).toFixed(2)} MB`)
-            lastLoggedSize = totalDownloaded
-          }
-        }
-      })
-      
+      await updateInfo.downloadAndInstall()
       console.log("Update installed successfully!")
       setUpdating(false)
       setUpdateInfo(null)
@@ -249,7 +252,6 @@ export default function MimirApp() {
     } catch (err) {
       console.error("Update failed:", err)
       setUpdating(false)
-      setShowUpdateNotification(true)
     }
   }
 
@@ -259,16 +261,44 @@ export default function MimirApp() {
     setIsCheckingAuth(true)
     try {
       const result = await invoke<string>("try_auto_login")
-      console.log("Auto-login successful:", result)
       setUsername(result)
       setIsAuthenticated(true)
     } catch (err) {
-      console.log("No auto-login available:", err)
       setIsAuthenticated(false)
     } finally {
       setIsCheckingAuth(false)
     }
   }
+
+  const getLoginErrorMessage = (error: string): string => {
+    const errorLower = error.toLowerCase();
+    
+    if (errorLower.includes('invalid credentials') || errorLower.includes('wrong password')) {
+      return 'Invalid username or password. Please try again.';
+    }
+    
+    if (errorLower.includes('user not found')) {
+      return 'No account found with this username. Please check your credentials.';
+    }
+    
+    if (errorLower.includes('network') || errorLower.includes('connection')) {
+      return 'Network connection failed. Please check your internet connection.';
+    }
+    
+    if (errorLower.includes('rate limit')) {
+      return 'Too many login attempts. Please wait a few minutes and try again.';
+    }
+    
+    if (errorLower.includes('database') || errorLower.includes('server')) {
+      return 'Temporary server issue. Please try again in a moment.';
+    }
+    
+    if (errorLower.includes('locked') || errorLower.includes('suspended')) {
+      return 'Account temporarily locked. Please try again later or reset your password.';
+    }
+    
+    return 'Login failed. Please check your credentials and try again.';
+  };
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -284,18 +314,40 @@ export default function MimirApp() {
         saveLoginBoolean: rememberMe,
       })
       
-      console.log("Login successful:", result)
       setUsername(result)
       setIsAuthenticated(true)
       setLoginUsername("")
       setLoginPassword("")
     } catch (err) {
-      console.error("Login error:", err)
-      setLoginError(err as string)
+      const errorMessage = getLoginErrorMessage(err as string)
+      setLoginError(errorMessage)
+      setLoginPassword("")
     } finally {
       setIsLoggingIn(false)
     }
   }
+
+  const getPasswordResetErrorMessage = (error: string): string => {
+    const errorLower = error.toLowerCase();
+    
+    if (errorLower.includes('user not found') || errorLower.includes('email not found')) {
+      return 'No account found with this email address.';
+    }
+    
+    if (errorLower.includes('rate limit')) {
+      return 'Too many reset attempts. Please wait before trying again.';
+    }
+    
+    if (errorLower.includes('invalid email')) {
+      return 'Please enter a valid email address.';
+    }
+    
+    if (errorLower.includes('network') || errorLower.includes('connection')) {
+      return 'Network connection failed. Please check your internet connection.';
+    }
+    
+    return 'Failed to send reset email. Please try again.';
+  };
 
   const handleForgotPassword = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -321,8 +373,8 @@ export default function MimirApp() {
         setResetMessage("")
       }, 3000)
     } catch (err) {
-      console.error("Password reset error:", err)
-      setResetError(err as string || "Failed to send reset email. Please try again.")
+      const errorMessage = getPasswordResetErrorMessage(err as string)
+      setResetError(errorMessage)
     } finally {
       setIsResetting(false)
     }
@@ -331,7 +383,6 @@ export default function MimirApp() {
   const handleLogout = async () => {
     try {
       await invoke("logout")
-      console.log("Logout successful")
       setIsAuthenticated(false)
       setUsername("")
       setHistory([])
@@ -342,6 +393,178 @@ export default function MimirApp() {
     } catch (err) {
       console.error("Logout error:", err)
     }
+  }
+
+  // ========== EXPORT FUNCTIONS ==========
+
+  const exportChartAsPNG = async (chartInstance: echarts.ECharts | null) => {
+    if (!chartInstance) return
+    
+    try {
+      const dataUrl = chartInstance.getDataURL({
+        type: 'png',
+        pixelRatio: 2,
+        backgroundColor: theme === "dark" ? '#1a1a1a' : '#ffffff'
+      })
+      
+      setExportModal({
+        isOpen: true,
+        type: 'png',
+        dataUrl,
+        fileName: `chart-${new Date().getTime()}.png`
+      })
+    } catch (err) {
+      console.error('Failed to export chart:', err)
+      alert('Failed to export chart. Please try again.')
+    }
+  }
+
+  const exportChartAsSVG = async (chartInstance: echarts.ECharts | null) => {
+    if (!chartInstance) return
+    
+    try {
+      const svgDataUrl = chartInstance.getDataURL({
+        type: 'svg',
+        backgroundColor: theme === "dark" ? '#1a1a1a' : '#ffffff'
+      })
+      
+      // Extract SVG content from data URL
+      const svgContent = atob(svgDataUrl.split(',')[1])
+      
+      setExportModal({
+        isOpen: true,
+        type: 'svg',
+        fileContent: svgContent,
+        fileName: `chart-${new Date().getTime()}.svg`
+      })
+    } catch (err) {
+      console.error('Failed to export chart as SVG:', err)
+      alert('Failed to export chart. Please try again.')
+    }
+  }
+
+  const exportChartDataAsCSV = async (chartJson?: string) => {
+    if (!chartJson) return
+    
+    try {
+      const config = JSON.parse(chartJson)
+      let csvContent = ''
+      
+      // Extract data from chart configuration
+      if (config.dataset && config.dataset.source) {
+        const data = config.dataset.source
+        if (Array.isArray(data) && data.length > 0) {
+          // Assuming first row is headers
+          const headers = data[0]
+          const rows = data.slice(1)
+          
+          csvContent = headers.join(',') + '\n'
+          rows.forEach(row => {
+            csvContent += row.join(',') + '\n'
+          })
+        }
+      } else if (config.series && config.series[0] && config.series[0].data) {
+        // For simple charts, try to extract data from series
+        const series = config.series[0]
+        if (series.data && Array.isArray(series.data)) {
+          if (config.xAxis && config.xAxis.data) {
+            // For charts with xAxis categories
+            csvContent = 'Category,Value\n'
+            config.xAxis.data.forEach((category: string, index: number) => {
+              const value = series.data[index]
+              csvContent += `"${category}",${value}\n`
+            })
+          } else {
+            // For numeric data
+            csvContent = 'Value\n'
+            series.data.forEach((value: number) => {
+              csvContent += `${value}\n`
+            })
+          }
+        }
+      }
+      
+      if (csvContent) {
+        setExportModal({
+          isOpen: true,
+          type: 'csv',
+          fileContent: csvContent,
+          fileName: `chart-data-${new Date().getTime()}.csv`
+        })
+      } else {
+        alert('No data available to export from this chart.')
+      }
+    } catch (err) {
+      console.error('Failed to export chart data:', err)
+      alert('Failed to export chart data. Please try again.')
+    }
+  }
+
+  const handleExportDownload = async () => {
+    const { type, dataUrl, fileContent, fileName } = exportModal
+    
+    try {
+      if (type === 'png' && dataUrl) {
+        // For PNG, create download link
+        const link = document.createElement('a')
+        link.href = dataUrl
+        link.download = fileName || 'chart.png'
+        document.body.appendChild(link)
+        link.click()
+        document.body.removeChild(link)
+      } else if ((type === 'svg' || type === 'csv') && fileContent) {
+        // For SVG and CSV, create blob and download
+        const blob = new Blob([fileContent], { 
+          type: type === 'svg' ? 'image/svg+xml' : 'text/csv' 
+        })
+        const url = URL.createObjectURL(blob)
+        const link = document.createElement('a')
+        link.href = url
+        link.download = fileName || `chart.${type}`
+        document.body.appendChild(link)
+        link.click()
+        document.body.removeChild(link)
+        URL.revokeObjectURL(url)
+      }
+      
+      // Close modal after download
+      setExportModal({ isOpen: false, type: null })
+      
+    } catch (err) {
+      console.error('Download failed:', err)
+      alert('Download failed. Please try again.')
+    }
+  }
+
+  // ========== FILE UPLOAD FUNCTIONS ==========
+
+  const handleFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = event.target.files
+    if (!files || files.length === 0) return
+
+    if (files.length === 1) {
+      const file = files[0]
+      if (file.name.toLowerCase().endsWith(".csv") || file.name.toLowerCase().match(/\.xlsx?$/)) {
+        try {
+          await setCsvPathForChat((file as any).path)
+        } catch (err) {
+          console.error("Failed to load CSV:", err)
+          alert("Failed to load CSV file. Please try again.")
+        }
+      } else {
+        alert("Please select a CSV or Excel file.")
+      }
+    } else {
+      await handleMultipleFilesDrop(files)
+    }
+
+    if (fileInputRef.current) {
+      fileInputRef.current.value = ""
+    }
+  }
+
+  const handleUploadAreaClick = () => {
+    fileInputRef.current?.click()
   }
 
   // ========== CHAT MANAGEMENT ==========
@@ -475,14 +698,10 @@ export default function MimirApp() {
 
     setLoading(true)
     try {
-      console.log("Invoking analyze_query with:", { csvPath, query })
-
       const response = await invoke<AnalysisResponse>("analyze_query", {
         csvPath,
         query,
       })
-
-      console.log("Got response from backend:", response)
 
       const newItem: HistoryItem = {
         id: Date.now(),
@@ -609,16 +828,13 @@ export default function MimirApp() {
     }
   }
 
-  // Helper function to update state and check for merges
   const updateUploadedFilesWithNewFiles = (newFiles: FileInfo[]) => {
     setUploadedFiles(prev => {
-      // Filter out duplicates by file path
       const existingPaths = new Set(prev.map(f => f.path))
       const uniqueNewFiles = newFiles.filter(file => !existingPaths.has(file.path))
       
       const updatedFiles = [...prev, ...uniqueNewFiles]
       
-      // Check for merges if we have at least 2 files total
       if (updatedFiles.length >= 2) {
         findMatchingColumns(updatedFiles)
       }
@@ -812,13 +1028,21 @@ export default function MimirApp() {
   const ChartRenderer = ({ chartJson }: { chartJson?: string }) => {
     const chartRef = useRef<HTMLDivElement>(null)
     const containerRef = useRef<HTMLDivElement>(null)
+    const chartInstance = useRef<echarts.ECharts | null>(null)
 
     useEffect(() => {
       if (!chartJson || !chartRef.current) return
 
       try {
         const config = JSON.parse(chartJson)
+        
+        // Handle text-only charts
+        if (config.type === 'text' || config.text) {
+          return
+        }
+
         const chart = echarts.init(chartRef.current, theme === "dark" ? "dark" : undefined)
+        chartInstance.current = chart
 
         const enhancedConfig = {
           ...config,
@@ -946,6 +1170,7 @@ export default function MimirApp() {
         return () => {
           window.removeEventListener("resize", handleResize)
           chart.dispose()
+          chartInstance.current = null
         }
       } catch (err) {
         console.error("ChartRenderer: Failed to render chart:", err)
@@ -954,19 +1179,68 @@ export default function MimirApp() {
 
     if (!chartJson) return null
 
+    try {
+      const config = JSON.parse(chartJson)
+      if (config.type === 'text' || config.text) {
+        return (
+          <div className="bg-card border rounded-lg p-6">
+            <div className="flex items-center gap-2 mb-4">
+              <FileText className="w-5 h-5 text-primary" />
+              <h3 className="font-semibold text-foreground">Analysis Output</h3>
+            </div>
+            <div className="bg-secondary/50 border rounded p-4">
+              <pre className="text-sm font-mono text-foreground whitespace-pre-wrap break-words">
+                {config.text || chartJson}
+              </pre>
+            </div>
+          </div>
+        )
+      }
+    } catch {
+      // Not a text chart, continue with visual chart
+    }
+
     return (
-      <div className="bg-card border-2 border-primary/20 rounded-xl p-6 shadow-lg shadow-primary/5">
+      <div className="bg-card border rounded-lg p-6">
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2">
             <Activity className="w-5 h-5 text-primary" />
             <h3 className="font-semibold text-foreground">Visualization</h3>
           </div>
-          <div className="text-xs text-muted-foreground">Drag to pan • Scroll to zoom</div>
+          
+          {/* Export buttons */}
+          <div className="flex items-center gap-2">
+            <div className="text-xs text-muted-foreground mr-2">Drag to pan • Scroll to zoom</div>
+            <div className="flex gap-1">
+              <button
+                onClick={() => exportChartAsPNG(chartInstance.current)}
+                className="p-2 text-muted-foreground hover:text-foreground hover:bg-accent rounded transition-all"
+                title="Export as PNG"
+              >
+                <Image className="w-4 h-4" />
+              </button>
+              <button
+                onClick={() => exportChartAsSVG(chartInstance.current)}
+                className="p-2 text-muted-foreground hover:text-foreground hover:bg-accent rounded transition-all"
+                title="Export as SVG"
+              >
+                <FileDown className="w-4 h-4" />
+              </button>
+              <button
+                onClick={() => exportChartDataAsCSV(chartJson)}
+                className="p-2 text-muted-foreground hover:text-foreground hover:bg-accent rounded transition-all"
+                title="Export data as CSV"
+              >
+                <FileSpreadsheet className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
         </div>
+        
         <div ref={containerRef} className="w-full overflow-x-auto">
           <div
             ref={chartRef}
-            className="w-full h-[400px] min-w-[600px] bg-gradient-to-br from-secondary/50 to-accent/30 rounded-lg border border-border"
+            className="w-full h-[400px] min-w-[600px] bg-secondary/20 rounded border"
             style={{ minHeight: "400px" }}
           />
         </div>
@@ -982,7 +1256,7 @@ export default function MimirApp() {
     if (!item.showRecommendedPrompts || promptsToShow.length === 0) return null
 
     return (
-      <section className="bg-gradient-to-br from-primary/5 to-primary/10 border-2 border-primary/30 rounded-xl p-4 sm:p-6 mt-4 shadow-md">
+      <section className="bg-primary/5 border border-primary/20 rounded-lg p-6 mt-4">
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2">
             <Lightbulb className="w-5 h-5 text-primary" />
@@ -990,7 +1264,7 @@ export default function MimirApp() {
           </div>
           <button
             onClick={() => toggleItemRecommendedPrompts(item.id)}
-            className="p-1.5 text-primary hover:bg-primary/20 rounded-lg transition-all"
+            className="p-1.5 text-primary hover:bg-primary/20 rounded transition-all"
             title="Hide suggestions"
           >
             <ChevronUp className="w-4 h-4" />
@@ -1002,10 +1276,10 @@ export default function MimirApp() {
             <button
               key={index}
               onClick={() => handlePromptClick(prompt)}
-              className="text-left p-3 bg-card hover:bg-accent rounded-lg border-2 border-border hover:border-primary/50 transition-all text-sm text-foreground group shadow-sm hover:shadow-md"
+              className="text-left p-3 bg-card hover:bg-accent rounded-lg border hover:border-primary/50 transition-all text-sm text-foreground group"
             >
               <div className="flex items-start gap-2">
-                <Sparkles className="w-4 h-4 text-primary mt-0.5 flex-shrink-0 group-hover:scale-110 transition-transform" />
+                <Sparkles className="w-4 h-4 text-primary mt-0.5 flex-shrink-0" />
                 <span className="flex-1 break-words">{prompt}</span>
               </div>
             </button>
@@ -1019,7 +1293,7 @@ export default function MimirApp() {
     if (history.length > 0 || globalRecommendedPrompts.length === 0) return null
 
     return (
-      <section className="bg-gradient-to-br from-primary/5 to-primary/10 border-2 border-primary/30 rounded-xl p-4 sm:p-6 mb-6 shadow-md">
+      <section className="bg-primary/5 border border-primary/20 rounded-lg p-6 mb-6">
         <div className="flex items-center gap-2 mb-4">
           <Lightbulb className="w-5 h-5 text-primary" />
           <h3 className="font-semibold text-foreground">Suggested Questions</h3>
@@ -1030,10 +1304,10 @@ export default function MimirApp() {
             <button
               key={index}
               onClick={() => handlePromptClick(prompt)}
-              className="text-left p-3 bg-card hover:bg-accent rounded-lg border-2 border-border hover:border-primary/50 transition-all text-sm text-foreground group shadow-sm hover:shadow-md"
+              className="text-left p-3 bg-card hover:bg-accent rounded-lg border hover:border-primary/50 transition-all text-sm text-foreground group"
             >
               <div className="flex items-start gap-2">
-                <Sparkles className="w-4 h-4 text-primary mt-0.5 flex-shrink-0 group-hover:scale-110 transition-transform" />
+                <Sparkles className="w-4 h-4 text-primary mt-0.5 flex-shrink-0" />
                 <span className="flex-1 break-words">{prompt}</span>
               </div>
             </button>
@@ -1047,18 +1321,111 @@ export default function MimirApp() {
     if (!recommendations || recommendations.length === 0) return null
 
     return (
-      <div className="bg-gradient-to-br from-primary/5 to-accent/10 border-2 border-primary/30 rounded-xl p-6 shadow-md">
+      <div className="bg-primary/5 border border-primary/20 rounded-lg p-6">
         <div className="flex items-center gap-2 mb-4">
           <Brain className="w-5 h-5 text-primary" />
           <h3 className="font-semibold text-foreground">Mimir Recommends</h3>
         </div>
         <div className="space-y-3">
           {recommendations.map((recommendation, index) => (
-            <div key={index} className="flex items-start gap-3 p-3 bg-card rounded-lg border-2 border-border shadow-sm">
-             <div className="w-2 h-2 bg-primary rounded-full mt-2 flex-shrink-0 shadow-sm shadow-primary/50" />
+            <div key={index} className="flex items-start gap-3 p-3 bg-card rounded-lg border">
+              <div className="w-2 h-2 bg-primary rounded-full mt-2 flex-shrink-0" />
               <p className="text-sm text-foreground flex-1 break-words">{recommendation}</p>
             </div>
           ))}
+        </div>
+      </div>
+    )
+  }
+
+  // ========== EXPORT MODAL COMPONENT ==========
+
+  const ExportModal = () => {
+    if (!exportModal.isOpen) return null
+
+    const getModalTitle = () => {
+      switch (exportModal.type) {
+        case 'png': return 'Export as PNG Image'
+        case 'svg': return 'Export as SVG Vector'
+        case 'csv': return 'Export Data as CSV'
+        default: return 'Export'
+      }
+    }
+
+    const getModalDescription = () => {
+      switch (exportModal.type) {
+        case 'png': return 'Download a high-quality PNG image of your chart.'
+        case 'svg': return 'Download an SVG vector file for scalable graphics.'
+        case 'csv': return 'Download the chart data as a CSV file for further analysis.'
+        default: return ''
+      }
+    }
+
+    const getFilePreview = () => {
+      if (exportModal.type === 'png' && exportModal.dataUrl) {
+        return (
+          <div className="flex justify-center">
+            <img 
+              src={exportModal.dataUrl} 
+              alt="Chart preview" 
+              className="max-w-full h-48 object-contain border rounded bg-white"
+            />
+          </div>
+        )
+      } else if (exportModal.type === 'csv' && exportModal.fileContent) {
+        return (
+          <div className="max-h-48 overflow-auto bg-secondary/30 border rounded p-3">
+            <pre className="text-xs font-mono text-foreground whitespace-pre-wrap">
+              {exportModal.fileContent.split('\n').slice(0, 10).join('\n')}
+              {exportModal.fileContent.split('\n').length > 10 && '\n...'}
+            </pre>
+          </div>
+        )
+      } else if (exportModal.type === 'svg' && exportModal.fileContent) {
+        return (
+          <div className="max-h-48 overflow-auto bg-secondary/30 border rounded p-3">
+            <pre className="text-xs font-mono text-foreground whitespace-pre-wrap">
+              {exportModal.fileContent.substring(0, 200)}
+              {exportModal.fileContent.length > 200 && '...'}
+            </pre>
+          </div>
+        )
+      }
+      return null
+    }
+
+    return (
+      <div className="fixed inset-0 bg-black/60 backdrop-blur-md flex items-center justify-center z-50 p-4">
+        <div className="bg-card border rounded-lg p-6 w-full max-w-md">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-bold text-foreground">{getModalTitle()}</h3>
+            <button
+              onClick={() => setExportModal({ isOpen: false, type: null })}
+              className="p-1 text-muted-foreground hover:text-foreground hover:bg-accent rounded transition-all"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+
+          <p className="text-muted-foreground mb-4">{getModalDescription()}</p>
+
+          {getFilePreview()}
+
+          <div className="flex gap-2 justify-end mt-6">
+            <button
+              onClick={() => setExportModal({ isOpen: false, type: null })}
+              className="px-4 py-2 text-muted-foreground hover:bg-accent rounded transition-all"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleExportDownload}
+              className="px-4 py-2 bg-primary text-primary-foreground rounded hover:bg-primary/90 transition-all font-bold flex items-center gap-2"
+            >
+              <Download className="w-4 h-4" />
+              Download
+            </button>
+          </div>
         </div>
       </div>
     )
@@ -1068,9 +1435,11 @@ export default function MimirApp() {
 
   if (isCheckingAuth) {
     return (
-      <div className={`min-h-screen bg-background animated-gradient flex items-center justify-center ${theme}`}>
+      <div className={`min-h-screen bg-background flex items-center justify-center ${theme}`}>
         <div className="text-center">
-          <Brain className="w-16 h-16 text-primary mx-auto mb-4 animate-pulse" />
+          <div className="w-16 h-16 rounded-lg mx-auto mb-4 flex items-center justify-center">
+            <img src={iconPath} alt="Mimir" className="w-10 h-10" />
+          </div>
           <p className="text-foreground text-lg">Loading Mimir...</p>
         </div>
       </div>
@@ -1079,9 +1448,9 @@ export default function MimirApp() {
 
   if (showForgotPassword) {
     return (
-      <div className={`min-h-screen bg-background animated-gradient flex items-center justify-center p-4 ${theme}`}>
+      <div className={`min-h-screen bg-background flex items-center justify-center p-4 ${theme}`}>
         <div className="w-full max-w-md">
-          <div className="bg-card border-2 border-border rounded-2xl p-8 shadow-2xl">
+          <div className="bg-card border rounded-xl p-8">
             <button
               onClick={() => setShowForgotPassword(false)}
               className="flex items-center gap-2 text-muted-foreground hover:text-foreground mb-6 transition-colors"
@@ -1091,20 +1460,20 @@ export default function MimirApp() {
             </button>
 
             <div className="text-center mb-8">
-              <Key className="w-16 h-16 text-primary mx-auto mb-4 drop-shadow-lg" />
+              <Key className="w-16 h-16 text-primary mx-auto mb-4" />
               <h1 className="text-3xl font-bold text-foreground mb-2">Reset Password</h1>
               <p className="text-muted-foreground">Enter your email to receive a reset link</p>
             </div>
 
             <form onSubmit={handleForgotPassword} className="space-y-4">
               {resetError && (
-                <div className="bg-destructive/10 border-2 border-destructive/50 rounded-lg p-3 text-destructive text-sm">
+                <div className="bg-destructive/10 border border-destructive/50 rounded-lg p-3 text-destructive text-sm">
                   {resetError}
                 </div>
               )}
 
               {resetMessage && (
-                <div className="bg-primary/10 border-2 border-primary/50 rounded-lg p-3 text-primary text-sm">
+                <div className="bg-primary/10 border border-primary/50 rounded-lg p-3 text-primary text-sm">
                   {resetMessage}
                 </div>
               )}
@@ -1118,7 +1487,7 @@ export default function MimirApp() {
                   type="email"
                   value={resetEmail}
                   onChange={(e) => setResetEmail(e.target.value)}
-                  className="w-full px-4 py-3 bg-input border-2 border-border rounded-lg focus:ring-2 focus:ring-primary focus:border-primary text-foreground placeholder:text-muted-foreground transition-all"
+                  className="w-full px-4 py-3 bg-input border rounded-lg focus:ring-2 focus:ring-primary focus:border-primary text-foreground placeholder:text-muted-foreground transition-all"
                   placeholder="Enter your email address"
                   required
                   disabled={isResetting}
@@ -1128,7 +1497,7 @@ export default function MimirApp() {
               <button
                 type="submit"
                 disabled={isResetting}
-                className="w-full py-3 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed font-bold transition-all shadow-lg hover:shadow-xl hover:scale-[1.02] active:scale-[0.98] flex items-center justify-center gap-2"
+                className="w-full py-3 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed font-bold transition-all flex items-center justify-center gap-2"
               >
                 {isResetting ? (
                   <>
@@ -1151,18 +1520,20 @@ export default function MimirApp() {
 
   if (!isAuthenticated) {
     return (
-      <div className={`min-h-screen bg-background animated-gradient flex items-center justify-center p-4 ${theme}`}>
+      <div className={`min-h-screen bg-background flex items-center justify-center p-4 ${theme}`}>
         <div className="w-full max-w-md">
-          <div className="bg-card border-2 border-border rounded-2xl p-8 shadow-2xl">
+          <div className="bg-card border rounded-xl p-8">
             <div className="text-center mb-8">
-              <Brain className="w-16 h-16 text-primary mx-auto mb-4 drop-shadow-lg" />
-              <h1 className="text-3xl font-bold text-foreground mb-2">Welcome to Mimir</h1>
-              <p className="text-muted-foreground">AI-Powered Data Analysis Assistant</p>
+              <div className="w-16 h-16 rounded-lg mx-auto mb-4 flex items-center justify-center">
+                <img src={logoPath} alt="Mimir" />
+              </div>
+              <h1 className="text-3xl font-bold text-foreground mb-2">Mimir</h1>
+              <p className="text-muted-foreground">Data Analysis Platform</p>
             </div>
 
             <form onSubmit={handleLogin} className="space-y-4">
               {loginError && (
-                <div className="bg-destructive/10 border-2 border-destructive/50 rounded-lg p-3 text-destructive text-sm">
+                <div className="bg-destructive/10 border border-destructive/50 rounded-lg p-3 text-destructive text-sm">
                   {loginError}
                 </div>
               )}
@@ -1176,7 +1547,7 @@ export default function MimirApp() {
                   type="text"
                   value={loginUsername}
                   onChange={(e) => setLoginUsername(e.target.value)}
-                  className="w-full px-4 py-3 bg-input border-2 border-border rounded-lg focus:ring-2 focus:ring-primary focus:border-primary text-foreground placeholder:text-muted-foreground transition-all"
+                  className="w-full px-4 py-3 bg-input border rounded-lg focus:ring-2 focus:ring-primary focus:border-primary text-foreground placeholder:text-muted-foreground transition-all"
                   placeholder="Enter your username"
                   required
                   disabled={isLoggingIn}
@@ -1192,7 +1563,7 @@ export default function MimirApp() {
                   type="password"
                   value={loginPassword}
                   onChange={(e) => setLoginPassword(e.target.value)}
-                  className="w-full px-4 py-3 bg-input border-2 border-border rounded-lg focus:ring-2 focus:ring-primary focus:border-primary text-foreground placeholder:text-muted-foreground transition-all"
+                  className="w-full px-4 py-3 bg-input border rounded-lg focus:ring-2 focus:ring-primary focus:border-primary text-foreground placeholder:text-muted-foreground transition-all"
                   placeholder="Enter your password"
                   required
                   disabled={isLoggingIn}
@@ -1206,7 +1577,7 @@ export default function MimirApp() {
                     type="checkbox"
                     checked={rememberMe}
                     onChange={(e) => setRememberMe(e.target.checked)}
-                    className="w-4 h-4 text-primary bg-input border-border rounded focus:ring-2 focus:ring-primary"
+                    className="w-4 h-4 text-primary bg-input border rounded focus:ring-2 focus:ring-primary"
                     disabled={isLoggingIn}
                   />
                   <label htmlFor="remember" className="ml-2 text-sm text-foreground">
@@ -1227,7 +1598,7 @@ export default function MimirApp() {
               <button
                 type="submit"
                 disabled={isLoggingIn}
-                className="w-full py-3 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed font-bold transition-all shadow-lg hover:shadow-xl hover:scale-[1.02] active:scale-[0.98] flex items-center justify-center gap-2"
+                className="w-full py-3 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed font-bold transition-all flex items-center justify-center gap-2"
               >
                 {isLoggingIn ? (
                   <>
@@ -1261,11 +1632,24 @@ export default function MimirApp() {
   // ========== MAIN APP ==========
 
   return (
-    <div className={`min-h-screen bg-background animated-gradient flex overflow-hidden ${theme}`}>
+    <div className={`min-h-screen bg-background flex overflow-hidden ${theme}`}>
+      
+      {/* Hidden file input */}
+      <input
+        type="file"
+        ref={fileInputRef}
+        onChange={handleFileSelect}
+        accept=".csv,.xls,.xlsx"
+        multiple
+        className="hidden"
+      />
+      
+      {/* Export Modal */}
+      <ExportModal />
       
       {/* Update Notification */}
       {showUpdateNotification && (
-        <div className="fixed top-4 right-4 w-80 bg-card border-2 border-primary/40 rounded-xl p-4 shadow-2xl shadow-primary/20 z-50 backdrop-blur-sm animate-in slide-in-from-right-full duration-500">
+        <div className="fixed top-4 right-4 w-80 bg-card border border-primary/40 rounded-lg p-4 shadow-lg z-50 backdrop-blur-sm">
           <div className="flex items-start gap-3">
             <div className="flex-shrink-0 w-6 h-6 bg-primary rounded-full flex items-center justify-center">
               {updating ? (
@@ -1277,7 +1661,7 @@ export default function MimirApp() {
             <div className="flex-1 min-w-0">
               {updating ? (
                 <>
-                  <h4 className="font-bold text-foreground text-sm mb-1">Installing Update...</h4>
+                  <h4 className="font-bold text-foreground text-sm mb-1">Installing Update</h4>
                   <p className="text-muted-foreground text-xs mb-3">This may take a few moments</p>
                   <div className="w-full bg-secondary rounded-full h-1.5 mb-2">
                     <div className="bg-primary h-1.5 rounded-full animate-pulse" />
@@ -1285,19 +1669,19 @@ export default function MimirApp() {
                 </>
               ) : updateInfo ? (
                 <>
-                  <h4 className="font-bold text-foreground text-sm mb-1">Update Available! 🎉</h4>
+                  <h4 className="font-bold text-foreground text-sm mb-1">Update Available</h4>
                   <p className="text-muted-foreground text-xs mb-3">Version {updateInfo.version} is ready to install</p>
                   <div className="flex gap-2">
                     <button
                       onClick={performUpdate}
-                      className="flex-1 py-2 bg-primary text-primary-foreground text-sm font-medium rounded-lg hover:bg-primary/90 transition-all shadow-md hover:shadow-lg flex items-center justify-center gap-2"
+                      className="flex-1 py-2 bg-primary text-primary-foreground text-sm font-medium rounded hover:bg-primary/90 transition-all flex items-center justify-center gap-2"
                     >
                       <Zap className="w-3 h-3" />
                       Install Now
                     </button>
                     <button
                       onClick={dismissUpdate}
-                      className="px-3 py-2 text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition-all text-sm"
+                      className="px-3 py-2 text-muted-foreground hover:text-foreground hover:bg-accent rounded transition-all text-sm"
                     >
                       Later
                     </button>
@@ -1305,9 +1689,9 @@ export default function MimirApp() {
                 </>
               ) : (
                 <>
-                  <h4 className="font-bold text-foreground text-sm mb-1">Update Installed! ✅</h4>
+                  <h4 className="font-bold text-foreground text-sm mb-1">Update Installed</h4>
                   <p className="text-muted-foreground text-xs mb-3">Please restart the app to apply changes</p>
-                  <div className="bg-primary/10 border border-primary/30 rounded-lg p-3">
+                  <div className="bg-primary/10 border border-primary/30 rounded p-3">
                     <p className="text-primary text-xs font-medium text-center">
                       Close and reopen Mimir to complete the update
                     </p>
@@ -1315,9 +1699,9 @@ export default function MimirApp() {
                   <div className="flex justify-end mt-3">
                     <button
                       onClick={dismissUpdate}
-                      className="px-4 py-2 bg-primary text-primary-foreground text-sm font-medium rounded-lg hover:bg-primary/90 transition-all shadow-md hover:shadow-lg"
+                      className="px-4 py-2 bg-primary text-primary-foreground text-sm font-medium rounded hover:bg-primary/90 transition-all"
                     >
-                      Got it!
+                      Got it
                     </button>
                   </div>
                 </>
@@ -1337,23 +1721,25 @@ export default function MimirApp() {
 
       {/* Chat Sidebar */}
       <Drawer open={showChatSidebar} onOpenChange={setShowChatSidebar} direction="left">
-        <DrawerContent className="w-80 bg-sidebar/95 backdrop-blur-sm border-r-2 border-sidebar-border">
-          <DrawerHeader className="p-4 border-b-2 border-sidebar-border bg-gradient-to-br from-sidebar to-sidebar-accent/30">
+        <DrawerContent className="w-80 bg-sidebar backdrop-blur-sm border-r border-sidebar-border">
+          <DrawerHeader className="p-4 border-b border-sidebar-border">
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
-                <Brain className="w-6 h-6 text-primary drop-shadow-sm" />
+                <div className="w-10 h-10  rounded flex items-center justify-center">
+                  <img src={logoPath} alt="Mimir" />
+                </div>
                 <DrawerTitle className="text-lg font-bold text-sidebar-foreground">Mimir</DrawerTitle>
               </div>
               <button
                 onClick={() => setShowNewChatModal(true)}
-                className="p-2 text-primary hover:bg-primary/20 rounded-lg transition-all shadow-sm hover:shadow-md"
+                className="p-2 text-primary hover:bg-primary/20 rounded transition-all"
                 title="New Chat"
               >
                 <Plus className="w-5 h-5" />
               </button>
             </div>
 
-            <div className="bg-primary/15 border-2 border-primary/40 p-3 rounded-xl shadow-md mb-3">
+            <div className="bg-primary/10 border border-primary/20 p-3 rounded-lg mb-3">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2 min-w-0">
                   <User className="w-4 h-4 text-primary flex-shrink-0" />
@@ -1369,8 +1755,8 @@ export default function MimirApp() {
               </div>
             </div>
 
-            <div className="bg-primary/15 border-2 border-primary/40 p-3 rounded-xl shadow-md">
-              <p className="text-xs font-medium text-sidebar-foreground/70">Current Chat</p>
+            <div className="bg-primary/10 border border-primary/20 p-3 rounded-lg">
+              <p className="text-xs font-medium text-sidebar-foreground/70">Current Session</p>
               <p className="text-lg font-bold text-primary truncate">{currentChat}</p>
               <p className="text-xs text-sidebar-foreground/70 mt-1">
                 {history.length} message{history.length !== 1 ? "s" : ""}
@@ -1389,7 +1775,7 @@ export default function MimirApp() {
               <div
                 key={chat.name}
                 className={`p-3 border-b border-sidebar-border cursor-pointer hover:bg-sidebar-accent transition-all ${
-                  currentChat === chat.name ? "bg-primary/15 border-l-4 border-l-primary shadow-inner" : ""
+                  currentChat === chat.name ? "bg-primary/10 border-l-4 border-l-primary" : ""
                 }`}
                 onClick={() => handleSwitchChat(chat.name)}
               >
@@ -1399,7 +1785,7 @@ export default function MimirApp() {
                     <span className="font-medium text-sidebar-foreground truncate">{chat.name}</span>
                   </div>
                   <div className="flex items-center gap-1">
-                    <span className="text-xs text-sidebar-foreground/60 bg-sidebar-accent px-2 py-1 rounded-md shadow-sm">
+                    <span className="text-xs text-sidebar-foreground/60 bg-sidebar-accent px-2 py-1 rounded shadow-sm">
                       {chat.message_count}
                     </span>
                     <button
@@ -1427,10 +1813,10 @@ export default function MimirApp() {
             ))}
           </div>
 
-          <DrawerFooter className="p-4 border-t-2 border-sidebar-border bg-gradient-to-br from-sidebar to-sidebar-accent/30">
+          <DrawerFooter className="p-4 border-t border-sidebar-border">
             <button
               onClick={() => setShowChatSidebar(false)}
-              className="w-full p-2 text-sidebar-foreground/70 hover:bg-sidebar-accent rounded-lg transition-all flex items-center justify-center gap-2 shadow-sm hover:shadow-md"
+              className="w-full p-2 text-sidebar-foreground/70 hover:bg-sidebar-accent rounded transition-all flex items-center justify-center gap-2"
             >
               <X className="w-4 h-4" />
               Hide Sidebar
@@ -1449,28 +1835,30 @@ export default function MimirApp() {
       {/* Main Content */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {/* Top Bar */}
-        <div className="bg-card/95 backdrop-blur-sm border-b-2 border-border p-4 flex-shrink-0 shadow-md">
+        <div className="bg-card backdrop-blur-sm border-b border-border p-4 flex-shrink-0">
           <div className="flex items-center justify-between gap-4">
             <div className="flex items-center gap-3 min-w-0">
               {!showChatSidebar && (
                 <button
                   onClick={() => setShowChatSidebar(true)}
-                  className="p-2 text-muted-foreground hover:bg-accent rounded-lg transition-all shadow-sm hover:shadow-md"
-                  title="Show Chats"
+                  className="p-2 text-muted-foreground hover:bg-accent rounded transition-all"
+                  title="Show Sessions"
                 >
                   <Menu className="w-5 h-5" />
                 </button>
               )}
-              <Brain className="w-7 h-7 text-primary flex-shrink-0 drop-shadow-sm" />
+              <div className="w-7 h-7 rounded flex items-center justify-center">
+                <img src={iconPath} alt="Mimir" className="w-5 h-5" />
+              </div>
               <div className="min-w-0">
                 <h1 className="text-xl font-bold text-foreground">Mimir</h1>
-                <p className="text-xs text-muted-foreground hidden sm:block">AI-Powered Data Analysis Assistant</p>
+                <p className="text-xs text-muted-foreground hidden sm:block">Data Analysis Platform</p>
               </div>
             </div>
             <div className="flex items-center gap-3">
               <button
                 onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-                className="p-2 text-muted-foreground hover:bg-accent rounded-lg transition-all shadow-sm hover:shadow-md"
+                className="p-2 text-muted-foreground hover:bg-accent rounded transition-all"
                 title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
               >
                 {theme === "dark" ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
@@ -1495,24 +1883,25 @@ export default function MimirApp() {
           <div className="max-w-6xl mx-auto p-4 sm:p-6 w-full">
             
             {/* File Upload Section */}
-            <header className="bg-card/90 border-2 border-border rounded-xl p-4 sm:p-6 mb-6 shadow-lg">
+            <header className="bg-card border rounded-lg p-6 mb-6">
               <div
-                className={`flex flex-col items-center justify-center border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-all duration-300 ${
+                className={`flex flex-col items-center justify-center border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-all duration-300 ${
                   isDragging
-                    ? "border-primary bg-primary/20 scale-[1.02] shadow-lg shadow-primary/20"
-                    : "border-primary/40 bg-gradient-to-br from-secondary/50 to-accent/30 hover:bg-accent/50 hover:border-primary/60 hover:shadow-md"
+                    ? "border-primary bg-primary/20"
+                    : "border-primary/40 bg-secondary/30 hover:bg-accent/50 hover:border-primary/60"
                 }`}
                 onDragOver={handleDragOver}
                 onDragLeave={handleDragLeave}
                 onDrop={handleDrop}
+                onClick={handleUploadAreaClick}
               >
                 <FileDown
-                  className={`w-12 h-12 text-primary mb-4 transition-transform ${isDragging ? "scale-110" : ""}`}
+                  className={`w-12 h-12 text-primary mb-4 ${isDragging ? "scale-110" : ""}`}
                 />
                 <p className="text-foreground font-semibold text-lg mb-2">
-                  Drop your CSV or Excel file here
+                  Drop your CSV or Excel file here, or click to browse
                 </p>
-                <p className="text-muted-foreground/70 text-xs mt-2">
+                <p className="text-muted-foreground/70 text-sm mt-2">
                   Supports .csv, .xls and .xlsx files • Drop multiple files to merge them
                 </p>
               </div>
@@ -1525,7 +1914,7 @@ export default function MimirApp() {
                     {matchingColumns.length > 0 && (
                       <button
                         onClick={() => setShowMergeModal(true)}
-                        className="px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-all font-medium text-sm flex items-center gap-2"
+                        className="px-4 py-2 bg-primary text-primary-foreground rounded hover:bg-primary/90 transition-all font-medium text-sm flex items-center gap-2"
                       >
                         <Database className="w-4 h-4" />
                         Merge Files ({matchingColumns.length} matching columns)
@@ -1534,23 +1923,23 @@ export default function MimirApp() {
                   </div>
                   
                   {uploadedFiles.map((file) => (
-                    <div key={file.path} className="bg-gradient-to-br from-primary/15 to-primary/5 border-2 border-primary/30 rounded-xl p-4">
+                    <div key={file.path} className="bg-primary/10 border border-primary/20 rounded-lg p-4">
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-3 flex-1 min-w-0">
                           <Database className="w-5 h-5 text-primary flex-shrink-0" />
                           <div className="min-w-0 flex-1">
                             <p className="font-bold text-primary truncate">{file.name}</p>
-                            <p className="text-xs text-muted-foreground mt-1">
+                            <p className="text-sm text-muted-foreground mt-1">
                               {file.columns.length} columns • {file.preview.length - 1} rows
                             </p>
                             <div className="flex flex-wrap gap-1 mt-2">
                               {file.columns.slice(0, 4).map((col, idx) => (
-                                <span key={idx} className="px-2 py-1 bg-primary/20 text-primary text-xs rounded-md">
+                                <span key={idx} className="px-2 py-1 bg-primary/20 text-primary text-xs rounded">
                                   {col}
                                 </span>
                               ))}
                               {file.columns.length > 4 && (
-                                <span className="px-2 py-1 bg-primary/10 text-primary text-xs rounded-md">
+                                <span className="px-2 py-1 bg-primary/10 text-primary text-xs rounded">
                                   +{file.columns.length - 4} more
                                 </span>
                               )}
@@ -1559,7 +1948,7 @@ export default function MimirApp() {
                         </div>
                         <button
                           onClick={() => removeUploadedFile(file.path)}
-                          className="p-2 text-destructive hover:bg-destructive/20 rounded-lg transition-all ml-2"
+                          className="p-2 text-destructive hover:bg-destructive/20 rounded transition-all ml-2"
                           title="Remove file"
                         >
                           <Trash2 className="w-4 h-4" />
@@ -1572,13 +1961,13 @@ export default function MimirApp() {
 
               {/* Current file info */}
               {fileName && (
-                <div className="mt-4 p-4 bg-gradient-to-br from-primary/15 to-primary/5 border-2 border-primary/30 rounded-xl shadow-md">
+                <div className="mt-4 p-4 bg-primary/10 border border-primary/20 rounded-lg">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-3">
                       <Database className="w-5 h-5 text-primary" />
                       <div>
                         <p className="font-bold text-primary">{fileName}</p>
-                        <p className="text-xs text-muted-foreground mt-1">Ready for analysis</p>
+                        <p className="text-sm text-muted-foreground mt-1">Ready for analysis</p>
                       </div>
                     </div>
                     <span className="px-3 py-1 bg-primary/20 text-primary text-sm rounded-full font-medium">
@@ -1593,20 +1982,20 @@ export default function MimirApp() {
             {renderInitialRecommendedPrompts()}
 
             {/* Query Input */}
-            <section className="bg-card/90 border-2 border-border rounded-xl p-4 sm:p-6 mb-6 flex flex-col sm:flex-row gap-3 shadow-lg">
+            <section className="bg-card border rounded-lg p-6 mb-6 flex flex-col sm:flex-row gap-3">
               <input
                 type="text"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="Ask a question about your data..."
-                className="flex-1 px-4 py-3 bg-input border-2 border-border rounded-lg focus:ring-2 focus:ring-primary focus:border-primary text-base sm:text-lg text-foreground placeholder:text-muted-foreground min-w-0 transition-all shadow-sm"
+                className="flex-1 px-4 py-3 bg-input border rounded-lg focus:ring-2 focus:ring-primary focus:border-primary text-base sm:text-lg text-foreground placeholder:text-muted-foreground min-w-0 transition-all"
                 disabled={loading}
                 onKeyDown={(e) => e.key === "Enter" && handleAnalyze()}
               />
               <button
                 onClick={handleAnalyze}
                 disabled={loading || !query.trim() || !csvPath}
-                className="px-6 sm:px-8 py-3 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 font-bold transition-all whitespace-nowrap shadow-md hover:shadow-lg hover:scale-[1.02] active:scale-[0.98]"
+                className="px-6 sm:px-8 py-3 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 font-bold transition-all whitespace-nowrap"
               >
                 {loading ? (
                   <>
@@ -1625,9 +2014,9 @@ export default function MimirApp() {
               {history.map((item) => (
                 <article
                   key={item.id}
-                  className="bg-card/90 border-2 border-border rounded-xl overflow-hidden shadow-lg hover:shadow-xl transition-shadow"
+                  className="bg-card border rounded-lg overflow-hidden hover:shadow-md transition-shadow"
                 >
-                  <header className="bg-gradient-to-r from-primary/20 to-primary/10 border-b-2 border-primary/30 p-4">
+                  <header className="bg-primary/10 border-b border-primary/20 p-4">
                     <p className="text-foreground font-bold break-words">{item.query}</p>
                     <time className="text-muted-foreground text-sm mt-1">{item.timestamp}</time>
                   </header>
@@ -1638,31 +2027,37 @@ export default function MimirApp() {
                       <p className="text-destructive/80 text-sm mt-1 break-words">{item.response.error}</p>
                     </div>
                   ) : (
-                    <div className="p-4 sm:p-6 space-y-6">
-                      {/* Results Section */}
-                      <div className="space-y-4">
-                        <div className="flex items-center gap-2">
-                          <BarChart3 className="w-5 h-5 text-primary" />
-                          <h3 className="font-bold text-foreground">Results</h3>
+                    <div className="p-6 space-y-6">
+                      {/* Analysis Output */}
+                      {item.response.result && (
+                        <div className="space-y-4">
+                          <div className="flex items-center gap-2">
+                            <BarChart3 className="w-5 h-5 text-primary" />
+                            <h3 className="font-bold text-foreground">Analysis</h3>
+                          </div>
+                          <div className="bg-secondary/50 border rounded p-4">
+                            <pre className="text-sm font-mono text-foreground whitespace-pre-wrap break-words">
+                              {item.response.result}
+                            </pre>
+                          </div>
                         </div>
-                        <div className="bg-secondary/50 border-2 border-border p-4 rounded-lg shadow-inner">
-                          <pre className="text-sm font-mono text-foreground whitespace-pre-wrap break-words">
-                            {item.response.result}
-                          </pre>
-                        </div>
-                        <ChartRenderer chartJson={item.response.chart} />
-                      </div>
+                      )}
+
+                      {/* Chart Visualization */}
+                      <ChartRenderer chartJson={item.response.chart} />
 
                       {/* Summary Section */}
-                      <div className="space-y-4">
-                        <div className="flex items-center gap-2">
-                          <FileText className="w-5 h-5 text-primary" />
-                          <h3 className="font-bold text-foreground">Summary</h3>
+                      {item.response.summary && (
+                        <div className="space-y-4">
+                          <div className="flex items-center gap-2">
+                            <FileText className="w-5 h-5 text-primary" />
+                            <h3 className="font-bold text-foreground">Summary</h3>
+                          </div>
+                          <p className="text-foreground leading-relaxed break-words bg-secondary/40 border rounded p-4">
+                            {item.response.summary}
+                          </p>
                         </div>
-                        <p className="text-foreground leading-relaxed break-words bg-gradient-to-br from-secondary/40 to-accent/20 border-2 border-border p-4 rounded-lg shadow-sm">
-                          {item.response.summary}
-                        </p>
-                      </div>
+                      )}
 
                       {/* Mimir Recommends Section */}
                       {item.response.mimir_recommends && item.response.mimir_recommends.length > 0 && (
@@ -1684,27 +2079,27 @@ export default function MimirApp() {
       {/* New Chat Modal */}
       {showNewChatModal && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-md flex items-center justify-center z-50 p-4">
-          <div className="bg-card border-2 border-border rounded-xl p-6 w-full max-w-md shadow-2xl">
-            <h3 className="text-lg font-bold mb-4 text-foreground">Create New Chat</h3>
+          <div className="bg-card border rounded-lg p-6 w-full max-w-md">
+            <h3 className="text-lg font-bold mb-4 text-foreground">Create New Session</h3>
             <input
               type="text"
               value={newChatName}
               onChange={(e) => setNewChatName(e.target.value)}
-              placeholder="Enter chat name..."
-              className="w-full px-3 py-2 bg-input border-2 border-border rounded-lg focus:ring-2 focus:ring-primary focus:border-primary text-foreground placeholder:text-muted-foreground transition-all shadow-sm"
+              placeholder="Enter session name..."
+              className="w-full px-3 py-2 bg-input border rounded focus:ring-2 focus:ring-primary focus:border-primary text-foreground placeholder:text-muted-foreground transition-all"
               onKeyDown={(e) => e.key === "Enter" && handleCreateChat()}
             />
-            <div className="flex gap-2 justify-end">
+            <div className="flex gap-2 justify-end mt-4">
               <button
                 onClick={() => setShowNewChatModal(false)}
-                className="px-4 py-2 text-muted-foreground hover:bg-accent rounded-lg transition-all shadow-sm hover:shadow-md"
+                className="px-4 py-2 text-muted-foreground hover:bg-accent rounded transition-all"
               >
                 Cancel
               </button>
               <button
                 onClick={handleCreateChat}
                 disabled={!newChatName.trim()}
-                className="px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-all font-bold shadow-md hover:shadow-lg"
+                className="px-4 py-2 bg-primary text-primary-foreground rounded hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-all font-bold"
               >
                 Create
               </button>
@@ -1713,11 +2108,11 @@ export default function MimirApp() {
         </div>
       )}
 
-      {/* Enhanced Merge Files Modal */}
+      {/* Merge Files Modal */}
       {showMergeModal && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-md flex items-center justify-center z-50 p-4">
-          <div className="bg-card border-2 border-border rounded-xl p-6 w-full max-w-4xl shadow-2xl max-h-[90vh] overflow-y-auto">
-            <h3 className="text-lg font-bold mb-4 text-foreground">Merge Multiple Files</h3>
+          <div className="bg-card border rounded-lg p-6 w-full max-w-4xl max-h-[90vh] overflow-y-auto">
+            <h3 className="text-lg font-bold mb-4 text-foreground">Merge Files</h3>
             
             <div className="space-y-6">
               {/* Primary File Selection */}
@@ -1741,7 +2136,7 @@ export default function MimirApp() {
                         })
                       }
                     }}
-                    className="flex-1 px-3 py-2 bg-input border-2 border-border rounded-lg focus:ring-2 focus:ring-primary focus:border-primary text-foreground placeholder:text-muted-foreground"
+                    className="flex-1 px-3 py-2 bg-input border rounded focus:ring-2 focus:ring-primary focus:border-primary text-foreground placeholder:text-muted-foreground"
                   >
                     <option value="">Select primary file</option>
                     {uploadedFiles.map(file => (
@@ -1753,7 +2148,7 @@ export default function MimirApp() {
                   {mergeConfig.primaryFile && (
                     <button
                       onClick={() => removeFileFromMerge(mergeConfig.primaryFile)}
-                      className="p-2 text-destructive hover:bg-destructive/20 rounded-lg transition-all"
+                      className="p-2 text-destructive hover:bg-destructive/20 rounded transition-all"
                       title="Remove as primary"
                     >
                       <Trash2 className="w-4 h-4" />
@@ -1778,7 +2173,7 @@ export default function MimirApp() {
                   {/* Available Files to Add */}
                   {uploadedFiles.filter(f => f.path !== mergeConfig.primaryFile && 
                     !mergeConfig.filesToMerge.some(mf => mf.file_path === f.path)).length > 0 && (
-                    <div className="mb-4 p-3 bg-primary/10 border border-primary/30 rounded-lg">
+                    <div className="mb-4 p-3 bg-primary/10 border border-primary/20 rounded">
                       <p className="text-sm text-foreground mb-2">Add files to merge:</p>
                       <div className="flex flex-wrap gap-2">
                         {uploadedFiles
@@ -1788,7 +2183,7 @@ export default function MimirApp() {
                             <button
                               key={file.path}
                               onClick={() => addFileToMerge(file.path)}
-                              className="px-3 py-1 bg-primary/20 hover:bg-primary/30 text-primary text-sm rounded-lg transition-all flex items-center gap-2"
+                              className="px-3 py-1 bg-primary/20 hover:bg-primary/30 text-primary text-sm rounded transition-all flex items-center gap-2"
                             >
                               <Plus className="w-3 h-3" />
                               {file.name}
@@ -1807,7 +2202,7 @@ export default function MimirApp() {
                         const matchingColumns = file ? getMatchingColumns(mergeConfig.primaryFile, mergeFile.file_path) : []
                         
                         return (
-                          <div key={mergeFile.file_path} className="border-2 border-border rounded-lg p-4 bg-secondary/20">
+                          <div key={mergeFile.file_path} className="border rounded-lg p-4 bg-secondary/20">
                             <div className="flex items-start justify-between mb-3">
                               <div className="flex-1">
                                 <h4 className="font-medium text-foreground text-sm mb-1">
@@ -1836,7 +2231,7 @@ export default function MimirApp() {
                                   onChange={(e) => updateMergeConfigForFile(mergeFile.file_path, { 
                                     merge_column: e.target.value 
                                   })}
-                                  className="w-full px-2 py-1 bg-input border border-border rounded text-xs text-foreground focus:ring-1 focus:ring-primary focus:border-primary"
+                                  className="w-full px-2 py-1 bg-input border rounded text-xs text-foreground focus:ring-1 focus:ring-primary focus:border-primary"
                                 >
                                   <option value="">Select column</option>
                                   {matchingColumns.map(col => (
@@ -1856,7 +2251,7 @@ export default function MimirApp() {
                                   onChange={(e) => updateMergeConfigForFile(mergeFile.file_path, { 
                                     merge_type: e.target.value as any 
                                   })}
-                                  className="w-full px-2 py-1 bg-input border border-border rounded text-xs text-foreground focus:ring-1 focus:ring-primary focus:border-primary"
+                                  className="w-full px-2 py-1 bg-input border rounded text-xs text-foreground focus:ring-1 focus:ring-primary focus:border-primary"
                                 >
                                   <option value="inner">Inner Join</option>
                                   <option value="left">Left Join</option>
@@ -1898,7 +2293,7 @@ export default function MimirApp() {
 
                   {/* No files selected message */}
                   {mergeConfig.filesToMerge.length === 0 && (
-                    <div className="text-center py-8 text-muted-foreground border-2 border-dashed border-border rounded-lg">
+                    <div className="text-center py-8 text-muted-foreground border-2 border-dashed border-border rounded">
                       <Database className="w-8 h-8 mx-auto mb-2 opacity-50" />
                       <p className="text-sm">No files selected for merging</p>
                       <p className="text-xs mt-1">Click on files above to add them</p>
@@ -1909,7 +2304,7 @@ export default function MimirApp() {
 
               {/* Summary */}
               {mergeConfig.primaryFile && mergeConfig.filesToMerge.length > 0 && (
-                <div className="bg-primary/10 border border-primary/30 rounded-lg p-4">
+                <div className="bg-primary/10 border border-primary/20 rounded p-4">
                   <h4 className="font-medium text-foreground text-sm mb-2">Merge Summary</h4>
                   <div className="text-xs space-y-1">
                     <p>Primary file: <strong>{uploadedFiles.find(f => f.path === mergeConfig.primaryFile)?.name}</strong></p>
@@ -1936,7 +2331,7 @@ export default function MimirApp() {
                       filesToMerge: []
                     })
                   }}
-                  className="px-4 py-2 text-muted-foreground hover:bg-accent rounded-lg transition-all shadow-sm hover:shadow-md"
+                  className="px-4 py-2 text-muted-foreground hover:bg-accent rounded transition-all"
                 >
                   Cancel
                 </button>
@@ -1944,7 +2339,7 @@ export default function MimirApp() {
                   onClick={handleMergeFiles}
                   disabled={!mergeConfig.primaryFile || mergeConfig.filesToMerge.length === 0 || 
                     mergeConfig.filesToMerge.some(f => !f.merge_column)}
-                  className="px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-all font-bold shadow-md hover:shadow-lg flex items-center gap-2"
+                  className="px-4 py-2 bg-primary text-primary-foreground rounded hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-all font-bold flex items-center gap-2"
                 >
                   <Database className="w-4 h-4" />
                   Merge {mergeConfig.filesToMerge.length + 1} Files

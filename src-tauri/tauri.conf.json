@@ -9,20 +9,18 @@
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
-
   "app": {
     "windows": [
       {
         "title": "mimir",
-        "width": 800,
-        "height": 600
+        "width": 1200,
+        "height": 800
       }
     ],
     "security": {
       "csp": null
     }
   },
-
   "bundle": {
     "active": true,
     "targets": "all",

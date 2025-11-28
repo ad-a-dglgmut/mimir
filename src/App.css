@@ -3,7 +3,6 @@
 @custom-variant dark (&:is(.dark *));
 
 :root {
-  /* Brand blue as primary */
   --background: oklch(0.98 0.01 240);
   --foreground: oklch(0.25 0.02 240);
   --card: oklch(1 0 0);
@@ -11,11 +10,9 @@
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.25 0.02 240);
 
-  /* Brand blue #0093F8 */
   --primary: oklch(0.62 0.19 240);
   --primary-foreground: oklch(0.98 0.01 240);
 
-  /* Light blue tints for secondary */
   --secondary: oklch(0.95 0.03 240);
   --secondary-foreground: oklch(0.25 0.02 240);
 
@@ -38,9 +35,8 @@
   --chart-4: oklch(0.5 0.2 220);
   --chart-5: oklch(0.65 0.17 260);
 
-  --radius: 0.75rem;
+  --radius: 0.5rem;
 
-  /* Sidebar with brand colors */
   --sidebar: oklch(0.99 0.01 240);
   --sidebar-foreground: oklch(0.25 0.02 240);
   --sidebar-primary: oklch(0.62 0.19 240);
@@ -51,7 +47,6 @@
   --sidebar-ring: oklch(0.62 0.19 240);
 }
 
-/* Dark Mode - Sophisticated blue-tinted dark */
 .dark {
   --background: oklch(0.15 0.03 240);
   --foreground: oklch(0.98 0.01 240);
@@ -60,7 +55,6 @@
   --popover: oklch(0.18 0.03 240);
   --popover-foreground: oklch(0.98 0.01 240);
 
-  /* Bright brand blue for dark mode */
   --primary: oklch(0.68 0.21 240);
   --primary-foreground: oklch(0.15 0.03 240);
 
@@ -86,7 +80,7 @@
   --chart-4: oklch(0.55 0.2 220);
   --chart-5: oklch(0.7 0.18 260);
 
-  --radius: 0.75rem;
+  --radius: 0.5rem;
 
   --sidebar: oklch(0.17 0.03 240);
   --sidebar-foreground: oklch(0.98 0.01 240);
@@ -99,7 +93,6 @@
 }
 
 @theme inline {
-  /* optional: --font-sans, --font-serif, --font-mono if they are applied in the layout.tsx */
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -147,66 +140,32 @@
   }
 }
 
-/* Enhanced animated gradient background */
-@keyframes gradient-shift {
-  0%,
-  100% {
-    background-position: 0% 50%;
-  }
-  50% {
-    background-position: 100% 50%;
-  }
-}
-
-.animated-gradient {
-  background: linear-gradient(135deg, hsl(var(--background)), hsl(var(--secondary)), hsl(var(--background)));
-  background-size: 200% 200%;
-  animation: gradient-shift 15s ease infinite;
-}
-
-/* Enhanced scrollbar styling */
+/* Clean scrollbar styling */
 ::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
 }
 
 ::-webkit-scrollbar-track {
   background: hsl(var(--secondary));
-  border-radius: 5px;
+  border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb {
   background: hsl(var(--primary));
-  border-radius: 5px;
-  border: 2px solid hsl(var(--secondary));
+  border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
   background: hsl(var(--primary) / 0.8);
 }
 
-/* Smooth transitions for theme switching */
+/* Smooth transitions */
 * {
-  transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease;
+  transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
 }
 
-@keyframes slide-in-from-right {
-  from {
-    transform: translateX(100%);
-    opacity: 0;
-  }
-  to {
-    transform: translateX(0);
-    opacity: 1;
-  }
-}
-
-.animate-in {
-  animation: slide-in-from-right 0.3s ease-out;
-}
-/* ========== ENHANCED INPUT STYLING ========== */
-
-/* Base input styles for both light and dark modes */
+/* Enhanced input styling */
 .bg-input {
   background-color: hsl(var(--input)) !important;
   border-color: hsl(var(--border)) !important;
@@ -216,11 +175,11 @@
 .bg-input:focus {
   background-color: hsl(var(--input)) !important;
   border-color: hsl(var(--ring)) !important;
-  box-shadow: 0 0 0 2px hsl(var(--ring) / 0.2) !important;
+  box-shadow: 0 0 0 2px hsl(var(--ring) / 0.1) !important;
   outline: none !important;
 }
 
-/* Enhanced select dropdown styling */
+/* Select dropdown styling */
 select.bg-input {
   appearance: none;
   background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='m6 8 4 4 4-4'/%3e%3c/svg%3e");
@@ -234,80 +193,24 @@ select.bg-input {
   background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%239ca3af' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='m6 8 4 4 4-4'/%3e%3c/svg%3e");
 }
 
-/* Fix for select options in dark mode */
-.dark select option {
-  background-color: hsl(var(--card)) !important;
-  color: hsl(var(--card-foreground)) !important;
-}
-
-/* Enhanced placeholder styling */
+/* Placeholder styling */
 .bg-input::placeholder {
   color: hsl(var(--muted-foreground)) !important;
-  opacity: 0.8 !important;
+  opacity: 0.7 !important;
 }
 
-/* Specific fixes for merge modal inputs */
-.merge-select {
-  background-color: hsl(var(--input)) !important;
-  border: 2px solid hsl(var(--border)) !important;
-  color: hsl(var(--foreground)) !important;
-}
-
-.merge-select:focus {
-  border-color: hsl(var(--ring)) !important;
-  box-shadow: 0 0 0 2px hsl(var(--ring) / 0.2) !important;
-}
-
-/* Enhanced text input styling */
-input[type="text"],
-input[type="email"],
-input[type="password"] {
-  background-color: hsl(var(--input)) !important;
-  border-color: hsl(var(--border)) !important;
-  color: hsl(var(--foreground)) !important;
-}
-
-input[type="text"]:focus,
-input[type="email"]:focus,
-input[type="password"]:focus {
-  border-color: hsl(var(--ring)) !important;
-  box-shadow: 0 0 0 2px hsl(var(--ring) / 0.2) !important;
-  outline: none !important;
-}
-
-/* Fix for disabled inputs */
+/* Disabled states */
 .bg-input:disabled {
-  opacity: 0.6 !important;
+  opacity: 0.5 !important;
   cursor: not-allowed !important;
-  background-color: hsl(var(--muted)) !important;
 }
 
-/* Enhanced button states */
 button:disabled {
-  opacity: 0.6 !important;
+  opacity: 0.5 !important;
   cursor: not-allowed !important;
 }
 
-/* Improved modal backdrop */
-.fixed.inset-0.bg-black\/60 {
-  background-color: rgba(0, 0, 0, 0.7) !important;
-}
-
-/* Enhanced card shadows */
-.bg-card {
-  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06) !important;
-}
-
-.dark .bg-card {
-  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3), 0 2px 4px -1px rgba(0, 0, 0, 0.2) !important;
-}
-
-/* Smooth transitions for all interactive elements */
-button, input, select, textarea {
-  transition: all 0.2s ease-in-out !important;
-}
-
-/* Enhanced focus states for accessibility */
+/* Focus states for accessibility */
 button:focus-visible,
 input:focus-visible,
 select:focus-visible {
@@ -315,25 +218,7 @@ select:focus-visible {
   outline-offset: 2px !important;
 }
 
-/* Improved border contrast in dark mode */
-.dark .border-2 {
-  border-width: 2px !important;
-}
-
-.dark .border {
-  border-width: 1px !important;
-}
-
-/* Enhanced text contrast */
-.text-foreground {
-  color: hsl(var(--foreground)) !important;
-}
-
-.text-muted-foreground {
-  color: hsl(var(--muted-foreground)) !important;
-}
-
-/* Fix for code/pre blocks in dark mode */
+/* Code block styling */
 pre, code {
   background-color: hsl(var(--secondary)) !important;
   color: hsl(var(--secondary-foreground)) !important;
