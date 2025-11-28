@@ -31,6 +31,13 @@ struct LoginInfo {
     password: String,
 }
 
+#[derive(serde::Deserialize)]
+struct MergeConfig {
+    file_path: String,
+    merge_column: String,
+    merge_type: String,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 struct RefreshToken {
     #[serde(rename = "refreshToken")]
@@ -510,7 +517,7 @@ async fn analyze_query(
 
     let api_key = get_api_key(jwt_token).await?;
 
-    let (current_chat_name, history_json) = {
+    let (_current_chat_name, history_json) = {
         let current_chat = state.current_chat.lock().unwrap();
         let mut chats = state.chats.lock().unwrap();
 
@@ -607,14 +614,10 @@ async fn analyze_query(
 
 #[tauri::command]
 async fn load_csv_info(
-    app_handle: tauri::AppHandle,
     csv_path: String,
 ) -> Result<Vec<Vec<String>>, String> {
     use std::path::Path;
     use std::process::Command;
-
-    let (python_bin, _) =
-        get_python_paths(&app_handle).map_err(|e| format!("Failed to get Python paths: {}", e))?;
 
     let ext = Path::new(&csv_path)
         .extension()
@@ -636,8 +639,13 @@ import sys
 
 try:
     df = {}
-    data = df.head(5).astype(str).values.tolist()
-    print(json.dumps(data))
+    # Get column names
+    columns = df.columns.tolist()
+    # Get first 5 rows as strings
+    data = df.head(5).fillna('').astype(str).values.tolist()
+    # Combine columns and data
+    result = [columns] + data
+    print(json.dumps(result))
 except Exception as e:
     sys.stderr.write(str(e))
     sys.exit(1)
@@ -645,7 +653,7 @@ except Exception as e:
         read_cmd
     );
 
-    let output = Command::new(&python_bin)
+    let output = Command::new("python")
         .arg("-c")
         .arg(python_code)
         .output()
@@ -1030,6 +1038,187 @@ async fn request_password_reset(app_handle: AppHandle, email: String) -> Result<
     Ok(response_text)
 }
 
+#[tauri::command]
+async fn merge_files(
+    primary_path: String,
+    secondary_path: String,
+    merge_column: String,
+    merge_type: String, // "inner", "left", "right", "outer"
+) -> Result<String, String> {
+    use std::process::Command;
+    use std::path::Path;
+    use uuid::Uuid;
+
+    let output_dir = std::env::temp_dir();
+    let output_filename = format!("merged_{}.csv", Uuid::new_v4());
+    let output_path = output_dir.join(&output_filename);
+
+    let python_code = format!(
+        r#"
+import pandas as pd
+import sys
+
+try:
+    # Read both files
+    df1 = pd.read_csv(r'{}') if r'{}'.endswith('.csv') else pd.read_excel(r'{}')
+    df2 = pd.read_csv(r'{}') if r'{}'.endswith('.csv') else pd.read_excel(r'{}')
+    
+    # Ensure merge column exists in both dataframes
+    if '{}' not in df1.columns:
+        raise ValueError("Merge column '{}' not found in primary file")
+    if '{}' not in df2.columns:
+        raise ValueError("Merge column '{}' not found in secondary file")
+    
+    # Perform the merge
+    merged = pd.merge(df1, df2, on='{}', how='{}', suffixes=('_primary', '_secondary'))
+    
+    # Save merged file
+    merged.to_csv(r'{}', index=False)
+    print(r'{}')
+    
+except Exception as e:
+    sys.stderr.write(str(e))
+    sys.exit(1)
+"#,
+        primary_path, primary_path, primary_path,
+        secondary_path, secondary_path, secondary_path,
+        merge_column, merge_column,
+        merge_column, merge_column,
+        merge_column, merge_type,
+        output_path.to_string_lossy(),
+        output_path.to_string_lossy()
+    );
+
+    let output = Command::new("python")
+        .arg("-c")
+        .arg(python_code)
+        .output()
+        .map_err(|e| format!("Failed to run Python: {}", e))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "Merge failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    // Verify the file was created
+    if !output_path.exists() {
+        return Err("Merged file was not created".to_string());
+    }
+
+    Ok(output_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn merge_multiple_files(
+    primary_path: String,
+    merge_configs: Vec<MergeConfig>,
+) -> Result<String, String> {
+    use std::process::Command;
+    use std::path::Path;
+    use uuid::Uuid;
+
+    let output_dir = std::env::temp_dir();
+    let output_filename = format!("merged_{}.csv", Uuid::new_v4());
+    let output_path = output_dir.join(&output_filename);
+
+    // Build file reading code for all files to merge
+    let file_reading_code = merge_configs.iter().enumerate().map(|(index, config)| {
+        format!(
+            "    df_{} = pd.read_csv(r'{}') if r'{}'.endswith('.csv') else pd.read_excel(r'{}')",
+            index + 1, config.file_path, config.file_path, config.file_path
+        )
+    }).collect::<Vec<_>>().join("\n");
+
+    // Build merge operations
+    let mut merge_operations = String::new();
+    
+    for (index, config) in merge_configs.iter().enumerate() {
+        let merge_code = format!(
+            r#"
+    # Merge operation {}: {} with {}
+    df_merged = pd.merge(
+        df_merged, 
+        df_{}, 
+        left_on='{}', 
+        right_on='{}', 
+        how='{}', 
+        suffixes=('', '_{}')
+    )
+"#,
+            index + 1,
+            if index == 0 { "primary".to_string() } else { format!("merged_{}", index) },
+            Path::new(&config.file_path).file_name().unwrap().to_string_lossy(),
+            index + 1,
+            config.merge_column,
+            config.merge_column,
+            config.merge_type,
+            index + 1
+        );
+        merge_operations.push_str(&merge_code);
+    }
+
+    let python_code = format!(
+        r#"
+import pandas as pd
+import sys
+
+try:
+    # Read primary file
+    df_merged = pd.read_csv(r'{}') if r'{}'.endswith('.csv') else pd.read_excel(r'{}')
+    
+    # Read all files to merge
+{}
+
+    # Perform all merge operations
+{}
+    
+    # Remove duplicate columns (keep first occurrence)
+    df_merged = df_merged.loc[:, ~df_merged.columns.duplicated()]
+    
+    # Save merged file
+    df_merged.to_csv(r'{}', index=False)
+    print(r'{}')
+    
+except Exception as e:
+    sys.stderr.write(str(e))
+    sys.exit(1)
+"#,
+        primary_path, 
+        primary_path, 
+        primary_path,
+        file_reading_code,
+        merge_operations,
+        output_path.to_string_lossy(),
+        output_path.to_string_lossy()
+    );
+
+    println!("Executing Python code:\n{}", python_code);
+
+    let output = Command::new("python")
+        .arg("-c")
+        .arg(python_code)
+        .output()
+        .map_err(|e| format!("Failed to run Python: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(format!(
+            "Merge failed:\nSTDERR: {}\nSTDOUT: {}",
+            stderr, stdout
+        ));
+    }
+
+    // Verify the file was created
+    if !output_path.exists() {
+        return Err("Merged file was not created".to_string());
+    }
+
+    Ok(output_path.to_string_lossy().to_string())
+}
+
 
 fn main() {
     println!("Starting Mimir application");
@@ -1070,6 +1259,7 @@ fn main() {
             delete_chat,
             set_csv_path,
             get_csv_path,
+            merge_multiple_files,
             clear_history,
             get_history,
             save_history,
@@ -1077,6 +1267,7 @@ fn main() {
             stop_python_service,
             analyze_query,
             load_csv_info,
+            merge_files,
             login,
             logout,
             refresh_token,
@@ -1091,8 +1282,7 @@ fn load_chats_sync(
     app_handle: &tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
-    let app_dir = app_handle
-        .path()
+    let app_dir = app_handle .path()
         .app_data_dir()
         .map_err(|e| format!("Failed to get app data dir: {}", e))?;
 

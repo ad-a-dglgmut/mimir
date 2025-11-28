@@ -1,7 +1,6 @@
 "use client"
 
 import type React from "react"
-
 import { useState, useEffect, useRef } from "react"
 import * as echarts from "echarts"
 import {
@@ -32,8 +31,10 @@ import { invoke } from "@tauri-apps/api/core"
 import { listen } from "@tauri-apps/api/event"
 import "./App.css"
 import { Drawer, DrawerContent, DrawerHeader, DrawerFooter, DrawerTitle } from "./components/ui/drawer"
-import { check } from "@tauri-apps/plugin-updater";
-import type { Update } from "@tauri-apps/plugin-updater";
+import { check } from "@tauri-apps/plugin-updater"
+import type { Update } from "@tauri-apps/plugin-updater"
+
+// ========== INTERFACES ==========
 
 interface AnalysisResponse {
   raw_output: string
@@ -59,6 +60,24 @@ interface HistoryItem {
   showRecommendedPrompts?: boolean
 }
 
+interface FileInfo {
+  name: string
+  path: string
+  columns: string[]
+  preview: string[][]
+}
+
+interface MergeFileConfig {
+  file_path: string
+  merge_column: string
+  merge_type: 'inner' | 'left' | 'right' | 'outer'
+}
+
+interface MergeConfig {
+  primaryFile: string
+  filesToMerge: MergeFileConfig[]
+}
+
 interface ChatInfo {
   name: string
   created_at: string
@@ -66,12 +85,15 @@ interface ChatInfo {
   csv_path: any
 }
 
+// ========== MAIN COMPONENT ==========
+
 export default function MimirApp() {
+  // ========== STATE ==========
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false)
   const [isCheckingAuth, setIsCheckingAuth] = useState<boolean>(true)
   const [username, setUsername] = useState<string>("")
   
-  // Login form state
+  // Auth state
   const [loginUsername, setLoginUsername] = useState<string>("")
   const [loginPassword, setLoginPassword] = useState<string>("")
   const [rememberMe, setRememberMe] = useState<boolean>(true)
@@ -85,64 +107,44 @@ export default function MimirApp() {
   const [resetMessage, setResetMessage] = useState<string>("")
   const [resetError, setResetError] = useState<string>("")
 
+  // App state
   const [csvPath, setCsvPath] = useState<string>("")
   const [fileName, setFileName] = useState<string>("")
   const [query, setQuery] = useState<string>("")
   const [loading, setLoading] = useState<boolean>(false)
   const [history, setHistory] = useState<HistoryItem[]>([])
   const [isDragging, setIsDragging] = useState<boolean>(false)
-
   const [theme, setTheme] = useState<"light" | "dark">("dark")
 
-  // Chat management state
+  // Chat state
   const [chats, setChats] = useState<ChatInfo[]>([])
   const [currentChat, setCurrentChat] = useState<string>("default")
   const [showChatSidebar, setShowChatSidebar] = useState<boolean>(true)
   const [showNewChatModal, setShowNewChatModal] = useState<boolean>(false)
   const [newChatName, setNewChatName] = useState<string>("")
 
-  const [globalRecommendedPrompts, setGlobalRecommendedPrompts] = useState<string[]>([])
+  // File management state
+  const [uploadedFiles, setUploadedFiles] = useState<FileInfo[]>([])
+  const [showMergeModal, setShowMergeModal] = useState<boolean>(false)
+  const [matchingColumns, setMatchingColumns] = useState<string[]>([])
+  const [mergeConfig, setMergeConfig] = useState<MergeConfig>({
+    primaryFile: '',
+    filesToMerge: []
+  })
 
+  // Update state
+  const [globalRecommendedPrompts, setGlobalRecommendedPrompts] = useState<string[]>([])
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const historyContainerRef = useRef<HTMLDivElement>(null)
-  const [updateInfo, setUpdateInfo] = useState<Update | null>(null);
-  const [updating, setUpdating] = useState(false);
-  const [showUpdateNotification, setShowUpdateNotification] = useState<boolean>(false);
+  const [updateInfo, setUpdateInfo] = useState<Update | null>(null)
+  const [updating, setUpdating] = useState(false)
+  const [showUpdateNotification, setShowUpdateNotification] = useState<boolean>(false)
 
-useEffect(() => {
-  async function checkForUpdates() {
-    try {
-      const update = await check();
-      if (update !== null) {
-        setUpdateInfo(update);
-        setShowUpdateNotification(true);
-      }
-    } catch (err) {
-      console.error("Update check failed:", err);
-    }
-  }
-  checkForUpdates();
-}, []);
+  // ========== USE EFFECTS ==========
 
-const dismissUpdate = () => {
-  setShowUpdateNotification(false);
-};
-
-async function performUpdate() {
-  if (!updateInfo) return;
-  setUpdating(true);
-
-  try {
-    await updateInfo.downloadAndInstall((event) => {
-      if (event.event === "Progress") {
-        console.log("Downloaded chunk:", event.data.chunkLength);
-        // Cannot compute percentage reliably
-      }
-    });
-  } catch (err) {
-    console.error("Update failed:", err);
-  }
-}
+  useEffect(() => {
+    checkForUpdates()
+  }, [])
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -153,12 +155,10 @@ async function performUpdate() {
     document.documentElement.classList.toggle("light", theme === "light")
   }, [theme])
 
-  // Check for auto-login on mount
   useEffect(() => {
     checkAutoLogin()
   }, [])
 
-  // Load data when authenticated
   useEffect(() => {
     if (isAuthenticated) {
       loadCurrentChat()
@@ -166,6 +166,94 @@ async function performUpdate() {
       loadGlobalRecommendedPrompts()
     }
   }, [isAuthenticated])
+
+  useEffect(() => {
+    const unlisten = listen("backend-log", (event) => {
+      console.log("Backend says:", event.payload)
+    })
+
+    return () => {
+      unlisten.then((f) => f())
+    }
+  }, [])
+
+  useEffect(() => {
+    const mainWindow = new Window("main")
+    let cleanup: (() => void) | undefined
+
+    mainWindow
+      .onDragDropEvent(async (event) => {
+        const payload = event.payload as FileDropPayload
+        if (payload.type === "drop" && payload.paths.length > 0) {
+          const filePaths = payload.paths
+          if (filePaths.length === 1) {
+            try {
+              await setCsvPathForChat(filePaths[0])
+            } catch (err) {
+              console.error("Failed to load CSV:", err)
+            }
+          } else {
+            await handleMultipleFilesDropFromPaths(filePaths)
+          }
+        }
+      })
+      .then((unlisten) => {
+        cleanup = unlisten
+      })
+
+    return () => {
+      if (cleanup) cleanup()
+    }
+  }, [])
+
+  // ========== UTILITY FUNCTIONS ==========
+
+  const checkForUpdates = async () => {
+    try {
+      const update = await check()
+      if (update !== null) {
+        setUpdateInfo(update)
+        setShowUpdateNotification(true)
+      }
+    } catch (err) {
+      console.error("Update check failed:", err)
+    }
+  }
+
+  const dismissUpdate = () => {
+    setShowUpdateNotification(false)
+  }
+
+  const performUpdate = async () => {
+    if (!updateInfo) return
+    setUpdating(true)
+
+    try {
+      let totalDownloaded = 0
+      let lastLoggedSize = 0
+      
+      await updateInfo.downloadAndInstall((event) => {
+        if (event.event === "Progress") {
+          totalDownloaded += event.data.chunkLength
+          if (totalDownloaded - lastLoggedSize >= 64 * 1024) {
+            console.log(`Downloaded: ${(totalDownloaded / (1024 * 1024)).toFixed(2)} MB`)
+            lastLoggedSize = totalDownloaded
+          }
+        }
+      })
+      
+      console.log("Update installed successfully!")
+      setUpdating(false)
+      setUpdateInfo(null)
+      setShowUpdateNotification(true)
+    } catch (err) {
+      console.error("Update failed:", err)
+      setUpdating(false)
+      setShowUpdateNotification(true)
+    }
+  }
+
+  // ========== AUTH FUNCTIONS ==========
 
   const checkAutoLogin = async () => {
     setIsCheckingAuth(true)
@@ -199,8 +287,6 @@ async function performUpdate() {
       console.log("Login successful:", result)
       setUsername(result)
       setIsAuthenticated(true)
-      
-      // Reset login form
       setLoginUsername("")
       setLoginPassword("")
     } catch (err) {
@@ -211,37 +297,36 @@ async function performUpdate() {
     }
   }
 
-const handleForgotPassword = async (e: React.FormEvent) => {
-  e.preventDefault()
-  if (!resetEmail.trim()) {
-    setResetError("Please enter your email address")
-    return
-  }
+  const handleForgotPassword = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!resetEmail.trim()) {
+      setResetError("Please enter your email address")
+      return
+    }
 
-  setIsResetting(true)
-  setResetError("")
-  setResetMessage("")
+    setIsResetting(true)
+    setResetError("")
+    setResetMessage("")
 
-  try {
-    // Use Tauri's invoke instead of fetch
-    //@ts-ignore
-    const result = await invoke<string>("request_password_reset", {
-      email: resetEmail,
-    })
-    
-    setResetMessage("Password reset email sent. Please check your inbox.")
-    setResetEmail("")
-    setTimeout(() => {
-      setShowForgotPassword(false)
-      setResetMessage("")
-    }, 3000)
-  } catch (err) {
-    console.error("Password reset error:", err)
-    setResetError(err as string || "Failed to send reset email. Please try again.")
-  } finally {
-    setIsResetting(false)
+    try {
+      //@ts-ignore
+      const result = await invoke<string>("request_password_reset", {
+        email: resetEmail,
+      })
+      
+      setResetMessage("Password reset email sent. Please check your inbox.")
+      setResetEmail("")
+      setTimeout(() => {
+        setShowForgotPassword(false)
+        setResetMessage("")
+      }, 3000)
+    } catch (err) {
+      console.error("Password reset error:", err)
+      setResetError(err as string || "Failed to send reset email. Please try again.")
+    } finally {
+      setIsResetting(false)
+    }
   }
-}
 
   const handleLogout = async () => {
     try {
@@ -253,10 +338,13 @@ const handleForgotPassword = async (e: React.FormEvent) => {
       setChats([])
       setCsvPath("")
       setFileName("")
+      setUploadedFiles([])
     } catch (err) {
       console.error("Logout error:", err)
     }
   }
+
+  // ========== CHAT MANAGEMENT ==========
 
   const loadGlobalRecommendedPrompts = async () => {
     const generalPrompts = [
@@ -328,6 +416,7 @@ const handleForgotPassword = async (e: React.FormEvent) => {
       await loadCurrentChatName()
       await loadCurrentChat()
       clearCsvInfo()
+      setUploadedFiles([])
     } catch (err) {
       alert(`Failed to create chat: ${err}`)
     }
@@ -338,6 +427,7 @@ const handleForgotPassword = async (e: React.FormEvent) => {
       await invoke("switch_chat", { chatName })
       setCurrentChat(chatName)
       await loadCurrentChat()
+      setUploadedFiles([])
     } catch (err) {
       console.error("Failed to switch chat:", err)
     }
@@ -374,15 +464,7 @@ const handleForgotPassword = async (e: React.FormEvent) => {
     }
   }
 
-  useEffect(() => {
-    const unlisten = listen("backend-log", (event) => {
-      console.log("Backend says:", event.payload)
-    })
-
-    return () => {
-      unlisten.then((f) => f())
-    }
-  }, [])
+  // ========== ANALYSIS FUNCTIONS ==========
 
   const handleAnalyze = async () => {
     if (!query.trim()) return
@@ -448,6 +530,8 @@ const handleForgotPassword = async (e: React.FormEvent) => {
     )
   }
 
+  // ========== FILE MANAGEMENT ==========
+
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault()
     setIsDragging(true)
@@ -463,61 +547,277 @@ const handleForgotPassword = async (e: React.FormEvent) => {
     setIsDragging(false)
 
     const files = Array.from(e.dataTransfer.files)
-    const csvFile: any = files.find((file) => file.name.toLowerCase().endsWith(".csv"))
+    
+    if (files.length === 1) {
+      const csvFile: any = files.find((file) => 
+        file.name.toLowerCase().endsWith(".csv") ||
+        file.name.toLowerCase().match(/\.xlsx?$/)
+      )
 
-    if (csvFile) {
-      try {
-        await setCsvPathForChat(csvFile.path)
-      } catch (err) {
-        console.error("Failed to load CSV:", err)
-        alert("Failed to load CSV file. Please try again.")
+      if (csvFile) {
+        try {
+          await setCsvPathForChat(csvFile.path)
+        } catch (err) {
+          console.error("Failed to load CSV:", err)
+          alert("Failed to load CSV file. Please try again.")
+        }
+      } else {
+        alert("Please drop a CSV or Excel file.")
       }
     } else {
-      alert("Please drop a CSV file.")
+      await handleMultipleFilesDrop(e.dataTransfer.files)
     }
   }
 
-  useEffect(() => {
-    const mainWindow = new Window("main")
+  const handleMultipleFilesDrop = async (files: FileList) => {
+    const csvFiles = Array.from(files).filter(file => 
+      file.name.toLowerCase().endsWith('.csv') || 
+      file.name.toLowerCase().match(/\.xlsx?$/)
+    )
 
-    let cleanup: (() => void) | undefined
-
-    mainWindow
-      .onDragDropEvent(async (event) => {
-        const payload = event.payload as FileDropPayload
-
-        if (payload.type === "drop" && payload.paths.length > 0) {
-          const filePath = payload.paths[0]
-          try {
-            await setCsvPathForChat(filePath)
-          } catch (err) {
-            console.error("Failed to load CSV:", err)
-          }
-        }
-      })
-      .then((unlisten) => {
-        cleanup = unlisten
-      })
-
-    return () => {
-      if (cleanup) cleanup()
+    if (csvFiles.length === 0) {
+      alert('Please drop CSV or Excel files.')
+      return
     }
-  }, [])
+
+    try {
+      const newFiles: FileInfo[] = []
+      for (const file of csvFiles) {
+        const fileInfo = await loadFileInfo(file)
+        newFiles.push(fileInfo)
+      }
+      
+      updateUploadedFilesWithNewFiles(newFiles)
+    } catch (err) {
+      console.error('Failed to load files:', err)
+      alert('Failed to load some files. Please try again.')
+    }
+  }
+
+  const handleMultipleFilesDropFromPaths = async (filePaths: string[]) => {
+    try {
+      const newFiles: FileInfo[] = []
+      for (const filePath of filePaths) {
+        const fileInfo = await loadFileInfoFromPath(filePath)
+        newFiles.push(fileInfo)
+      }
+      
+      updateUploadedFilesWithNewFiles(newFiles)
+    } catch (err) {
+      console.error('Failed to load files:', err)
+      alert('Failed to load some files. Please try again.')
+    }
+  }
+
+  // Helper function to update state and check for merges
+  const updateUploadedFilesWithNewFiles = (newFiles: FileInfo[]) => {
+    setUploadedFiles(prev => {
+      // Filter out duplicates by file path
+      const existingPaths = new Set(prev.map(f => f.path))
+      const uniqueNewFiles = newFiles.filter(file => !existingPaths.has(file.path))
+      
+      const updatedFiles = [...prev, ...uniqueNewFiles]
+      
+      // Check for merges if we have at least 2 files total
+      if (updatedFiles.length >= 2) {
+        findMatchingColumns(updatedFiles)
+      }
+      
+      return updatedFiles
+    })
+  }
+
+  const loadFileInfo = async (file: any): Promise<FileInfo> => {
+    try {
+      const preview = await invoke<Array<Array<string>>>("load_csv_info", {
+        csvPath: file.path
+      })
+      
+      const columns = preview.length > 0 ? preview[0] : []
+      
+      return {
+        name: file.name,
+        path: file.path,
+        columns,
+        preview: preview.slice(0, 5)
+      }
+    } catch (err) {
+      console.error('Error loading file info:', err)
+      throw new Error(`Failed to load file ${file.name}`)
+    }
+  }
+
+  const loadFileInfoFromPath = async (filePath: string): Promise<FileInfo> => {
+    try {
+      const preview = await invoke<Array<Array<string>>>("load_csv_info", {
+        csvPath: filePath
+      })
+      
+      const columns = preview.length > 0 ? preview[0] : []
+      
+      return {
+        name: filePath.split(/[\\/]/).pop() || filePath,
+        path: filePath,
+        columns,
+        preview: preview.slice(0, 5)
+      }
+    } catch (err) {
+      console.error('Error loading file info:', err)
+      throw new Error(`Failed to load file ${filePath}`)
+    }
+  }
+
+  const findMatchingColumns = (files: FileInfo[]) => {
+    if (files.length < 2) return
+
+    const allColumns = files.flatMap(file => file.columns)
+    const columnCounts: Record<string, number> = {}
+    
+    allColumns.forEach(col => {
+      columnCounts[col] = (columnCounts[col] || 0) + 1
+    })
+    
+    const matches = Object.entries(columnCounts)
+      .filter(([_, count]) => count >= 2)
+      .map(([col]) => col)
+    
+    setMatchingColumns(matches)
+    
+    if (files.length === 2 && matches.length > 0) {
+      setMergeConfig({
+        primaryFile: files[0].path,
+        filesToMerge: [{
+          file_path: files[1].path,
+          merge_column: matches[0],
+          merge_type: 'inner'
+        }]
+      })
+      setShowMergeModal(true)
+    }
+  }
+
+  const removeUploadedFile = (filePath: string) => {
+    setUploadedFiles(prev => prev.filter(file => file.path !== filePath))
+  }
+
+  // ========== MERGE FUNCTIONS ==========
+
+  const addFileToMerge = (filePath: string) => {
+    if (!mergeConfig.primaryFile) {
+      setMergeConfig({
+        primaryFile: filePath,
+        filesToMerge: []
+      })
+    } else {
+      const file = uploadedFiles.find(f => f.path === filePath)
+      const availableColumns = file ? getMatchingColumns(mergeConfig.primaryFile, filePath) : []
+      
+      setMergeConfig(prev => ({
+        ...prev,
+        filesToMerge: [
+          ...prev.filesToMerge,
+          {
+            file_path: filePath,
+            merge_column: availableColumns[0] || '',
+            merge_type: 'inner'
+          }
+        ]
+      }))
+    }
+  }
+
+  const removeFileFromMerge = (filePath: string) => {
+    if (filePath === mergeConfig.primaryFile) {
+      setMergeConfig({
+        primaryFile: '',
+        filesToMerge: []
+      })
+    } else {
+      setMergeConfig(prev => ({
+        ...prev,
+        filesToMerge: prev.filesToMerge.filter(f => f.file_path !== filePath)
+      }))
+    }
+  }
+
+  const updateMergeConfigForFile = (filePath: string, updates: Partial<MergeFileConfig>) => {
+    setMergeConfig(prev => ({
+      ...prev,
+      filesToMerge: prev.filesToMerge.map(file => 
+        file.file_path === filePath ? { ...file, ...updates } : file
+      )
+    }))
+  }
+
+  const getMatchingColumns = (primaryFilePath: string, secondaryFilePath: string): string[] => {
+    const primaryFile = uploadedFiles.find(f => f.path === primaryFilePath)
+    const secondaryFile = uploadedFiles.find(f => f.path === secondaryFilePath)
+    
+    if (!primaryFile || !secondaryFile) return []
+    
+    return primaryFile.columns.filter(col => 
+      secondaryFile.columns.includes(col)
+    )
+  }
+
+  const handleMergeFiles = async () => {
+    if (!mergeConfig.primaryFile || mergeConfig.filesToMerge.length === 0) {
+      alert('Please select a primary file and at least one file to merge')
+      return
+    }
+
+    const missingColumns = mergeConfig.filesToMerge.filter(file => !file.merge_column)
+    if (missingColumns.length > 0) {
+      alert('Please select merge columns for all files')
+      return
+    }
+
+    try {
+      const mergedPath = await invoke<string>("merge_multiple_files", {
+        primaryPath: mergeConfig.primaryFile,
+        mergeConfigs: mergeConfig.filesToMerge.map(config => ({
+          file_path: config.file_path,
+          merge_column: config.merge_column,
+          merge_type: config.merge_type
+        }))
+      })
+
+      await setCsvPathForChat(mergedPath)
+      
+      const mergedFilePaths = [
+        mergeConfig.primaryFile,
+        ...mergeConfig.filesToMerge.map(f => f.file_path)
+      ]
+      
+      setUploadedFiles(prev => 
+        prev.filter(file => !mergedFilePaths.includes(file.path))
+      )
+      
+      setShowMergeModal(false)
+      setMatchingColumns([])
+      setMergeConfig({
+        primaryFile: '',
+        filesToMerge: []
+      })
+      
+      alert(`Files merged successfully! Using: ${mergedPath.split(/[\\/]/).pop()}`)
+    } catch (err) {
+      console.error('Merge failed:', err)
+      alert(`Merge failed: ${err}`)
+    }
+  }
+
+  // ========== COMPONENT RENDERERS ==========
 
   const ChartRenderer = ({ chartJson }: { chartJson?: string }) => {
     const chartRef = useRef<HTMLDivElement>(null)
     const containerRef = useRef<HTMLDivElement>(null)
 
     useEffect(() => {
-      if (!chartJson || !chartRef.current) {
-        console.log("ChartRenderer: No chartJson or chartRef")
-        return
-      }
+      if (!chartJson || !chartRef.current) return
 
       try {
         const config = JSON.parse(chartJson)
-        console.log("ChartRenderer: Parsed config:", config)
-
         const chart = echarts.init(chartRef.current, theme === "dark" ? "dark" : undefined)
 
         const enhancedConfig = {
@@ -562,72 +862,64 @@ const handleForgotPassword = async (e: React.FormEvent) => {
             },
             ...config.tooltip,
           },
-          xAxis: config.xAxis
-            ? Array.isArray(config.xAxis)
-              ? config.xAxis.map((axis: any) => ({
-                  ...axis,
-                  axisLabel: {
-                    color: theme === "dark" ? "#F9F9F9" : "#1a1a1a",
-                    fontSize: 11,
-                    interval: 0,
-                    rotate: axis.axisLabel?.rotate || (axis.data?.length > 10 ? 45 : 0),
-                    ...axis.axisLabel,
-                  },
-                  axisLine: {
-                    lineStyle: {
-                      color: theme === "dark" ? "hsl(220 15% 18%)" : "hsl(220 15% 85%)",
-                    },
-                    ...axis.axisLine,
-                  },
-                }))
-              : {
-                  ...config.xAxis,
-                  axisLabel: {
-                    color: theme === "dark" ? "#F9F9F9" : "#1a1a1a",
-                    fontSize: 11,
-                    interval: 0,
-                    rotate: config.xAxis.axisLabel?.rotate || (config.xAxis.data?.length > 10 ? 45 : 0),
-                    ...config.xAxis.axisLabel,
-                  },
-                  axisLine: {
-                    lineStyle: {
-                      color: theme === "dark" ? "hsl(220 15% 18%)" : "hsl(220 15% 85%)",
-                    },
-                    ...config.xAxis.axisLine,
-                  },
-                }
-            : undefined,
-          yAxis: config.yAxis
-            ? Array.isArray(config.yAxis)
-              ? config.yAxis.map((axis: any) => ({
-                  ...axis,
-                  axisLabel: {
-                    color: theme === "dark" ? "#F9F9F9" : "#1a1a1a",
-                    fontSize: 11,
-                    ...axis.axisLabel,
-                  },
-                  axisLine: {
-                    lineStyle: {
-                      color: theme === "dark" ? "hsl(220 15% 18%)" : "hsl(220 15% 85%)",
-                    },
-                    ...axis.axisLine,
-                  },
-                }))
-              : {
-                  ...config.yAxis,
-                  axisLabel: {
-                    color: theme === "dark" ? "#F9F9F9" : "#1a1a1a",
-                    fontSize: 11,
-                    ...config.yAxis.axisLabel,
-                  },
-                  axisLine: {
-                    lineStyle: {
-                      color: theme === "dark" ? "hsl(220 15% 18%)" : "hsl(220 15% 85%)",
-                    },
-                    ...config.yAxis.axisLine,
-                  },
-                }
-            : undefined,
+          xAxis: config.xAxis ? (Array.isArray(config.xAxis) ? config.xAxis.map((axis: any) => ({
+            ...axis,
+            axisLabel: {
+              color: theme === "dark" ? "#F9F9F9" : "#1a1a1a",
+              fontSize: 11,
+              interval: 0,
+              rotate: axis.axisLabel?.rotate || (axis.data?.length > 10 ? 45 : 0),
+              ...axis.axisLabel,
+            },
+            axisLine: {
+              lineStyle: {
+                color: theme === "dark" ? "hsl(220 15% 18%)" : "hsl(220 15% 85%)",
+              },
+              ...axis.axisLine,
+            },
+          })) : {
+            ...config.xAxis,
+            axisLabel: {
+              color: theme === "dark" ? "#F9F9F9" : "#1a1a1a",
+              fontSize: 11,
+              interval: 0,
+              rotate: config.xAxis.axisLabel?.rotate || (config.xAxis.data?.length > 10 ? 45 : 0),
+              ...config.xAxis.axisLabel,
+            },
+            axisLine: {
+              lineStyle: {
+                color: theme === "dark" ? "hsl(220 15% 18%)" : "hsl(220 15% 85%)",
+              },
+              ...config.xAxis.axisLine,
+            },
+          }) : undefined,
+          yAxis: config.yAxis ? (Array.isArray(config.yAxis) ? config.yAxis.map((axis: any) => ({
+            ...axis,
+            axisLabel: {
+              color: theme === "dark" ? "#F9F9F9" : "#1a1a1a",
+              fontSize: 11,
+              ...axis.axisLabel,
+            },
+            axisLine: {
+              lineStyle: {
+                color: theme === "dark" ? "hsl(220 15% 18%)" : "hsl(220 15% 85%)",
+              },
+              ...axis.axisLine,
+            },
+          })) : {
+            ...config.yAxis,
+            axisLabel: {
+              color: theme === "dark" ? "#F9F9F9" : "#1a1a1a",
+              fontSize: 11,
+              ...config.yAxis.axisLabel,
+            },
+            axisLine: {
+              lineStyle: {
+                color: theme === "dark" ? "hsl(220 15% 18%)" : "hsl(220 15% 85%)",
+              },
+              ...config.yAxis.axisLine,
+            },
+          }) : undefined,
           grid: {
             left: "3%",
             right: "4%",
@@ -683,10 +975,9 @@ const handleForgotPassword = async (e: React.FormEvent) => {
   }
 
   const renderItemRecommendedPrompts = (item: HistoryItem) => {
-    const promptsToShow =
-      item.response.recommended_prompts && item.response.recommended_prompts.length > 0
-        ? item.response.recommended_prompts
-        : globalRecommendedPrompts
+    const promptsToShow = item.response.recommended_prompts && item.response.recommended_prompts.length > 0
+      ? item.response.recommended_prompts
+      : globalRecommendedPrompts
 
     if (!item.showRecommendedPrompts || promptsToShow.length === 0) return null
 
@@ -773,7 +1064,8 @@ const handleForgotPassword = async (e: React.FormEvent) => {
     )
   }
 
-  // Show loading screen while checking auth
+  // ========== AUTH SCREENS ==========
+
   if (isCheckingAuth) {
     return (
       <div className={`min-h-screen bg-background animated-gradient flex items-center justify-center ${theme}`}>
@@ -785,13 +1077,11 @@ const handleForgotPassword = async (e: React.FormEvent) => {
     )
   }
 
-  // Show forgot password page
   if (showForgotPassword) {
     return (
       <div className={`min-h-screen bg-background animated-gradient flex items-center justify-center p-4 ${theme}`}>
         <div className="w-full max-w-md">
-          <div className="bg-card/95 backdrop-blur-sm border-2 border-border rounded-2xl p-8 shadow-2xl">
-            {/* Back to login */}
+          <div className="bg-card border-2 border-border rounded-2xl p-8 shadow-2xl">
             <button
               onClick={() => setShowForgotPassword(false)}
               className="flex items-center gap-2 text-muted-foreground hover:text-foreground mb-6 transition-colors"
@@ -800,14 +1090,12 @@ const handleForgotPassword = async (e: React.FormEvent) => {
               Back to login
             </button>
 
-            {/* Logo and Title */}
             <div className="text-center mb-8">
               <Key className="w-16 h-16 text-primary mx-auto mb-4 drop-shadow-lg" />
               <h1 className="text-3xl font-bold text-foreground mb-2">Reset Password</h1>
               <p className="text-muted-foreground">Enter your email to receive a reset link</p>
             </div>
 
-            {/* Reset Form */}
             <form onSubmit={handleForgotPassword} className="space-y-4">
               {resetError && (
                 <div className="bg-destructive/10 border-2 border-destructive/50 rounded-lg p-3 text-destructive text-sm">
@@ -861,20 +1149,17 @@ const handleForgotPassword = async (e: React.FormEvent) => {
     )
   }
 
-  // Show login page if not authenticated
   if (!isAuthenticated) {
     return (
       <div className={`min-h-screen bg-background animated-gradient flex items-center justify-center p-4 ${theme}`}>
         <div className="w-full max-w-md">
-          <div className="bg-card/95 backdrop-blur-sm border-2 border-border rounded-2xl p-8 shadow-2xl">
-            {/* Logo and Title */}
+          <div className="bg-card border-2 border-border rounded-2xl p-8 shadow-2xl">
             <div className="text-center mb-8">
               <Brain className="w-16 h-16 text-primary mx-auto mb-4 drop-shadow-lg" />
               <h1 className="text-3xl font-bold text-foreground mb-2">Welcome to Mimir</h1>
               <p className="text-muted-foreground">AI-Powered Data Analysis Assistant</p>
             </div>
 
-            {/* Login Form */}
             <form onSubmit={handleLogin} className="space-y-4">
               {loginError && (
                 <div className="bg-destructive/10 border-2 border-destructive/50 rounded-lg p-3 text-destructive text-sm">
@@ -958,7 +1243,6 @@ const handleForgotPassword = async (e: React.FormEvent) => {
               </button>
             </form>
 
-            {/* Theme Toggle */}
             <div className="mt-6 text-center">
               <button
                 onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
@@ -974,76 +1258,86 @@ const handleForgotPassword = async (e: React.FormEvent) => {
     )
   }
 
-  // Main authenticated app
+  // ========== MAIN APP ==========
+
   return (
-
     <div className={`min-h-screen bg-background animated-gradient flex overflow-hidden ${theme}`}>
-{showUpdateNotification && updateInfo && !updating && (
-  <div className="fixed top-4 right-4 w-80 bg-card border-2 border-primary/40 rounded-xl p-4 shadow-2xl shadow-primary/20 z-50 backdrop-blur-sm animate-in slide-in-from-right-full duration-500">
-    <div className="flex items-start gap-3">
-      <div className="flex-shrink-0 w-6 h-6 bg-primary rounded-full flex items-center justify-center">
-        <Sparkles className="w-3 h-3 text-primary-foreground" />
-      </div>
-      <div className="flex-1 min-w-0">
-        <h4 className="font-bold text-foreground text-sm mb-1">
-          Update Available! 🎉
-        </h4>
-        <p className="text-muted-foreground text-xs mb-3">
-          Version {updateInfo.version} is ready to install
-        </p>
-        <div className="flex gap-2">
-          <button
-            onClick={performUpdate}
-            className="flex-1 py-2 bg-primary text-primary-foreground text-sm font-medium rounded-lg hover:bg-primary/90 transition-all shadow-md hover:shadow-lg flex items-center justify-center gap-2"
-          >
-            <Zap className="w-3 h-3" />
-            Install Now
-          </button>
-          <button
-            onClick={dismissUpdate}
-            className="px-3 py-2 text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition-all text-sm"
-          >
-            Later
-          </button>
+      
+      {/* Update Notification */}
+      {showUpdateNotification && (
+        <div className="fixed top-4 right-4 w-80 bg-card border-2 border-primary/40 rounded-xl p-4 shadow-2xl shadow-primary/20 z-50 backdrop-blur-sm animate-in slide-in-from-right-full duration-500">
+          <div className="flex items-start gap-3">
+            <div className="flex-shrink-0 w-6 h-6 bg-primary rounded-full flex items-center justify-center">
+              {updating ? (
+                <Loader2 className="w-3 h-3 text-primary-foreground animate-spin" />
+              ) : (
+                <Sparkles className="w-3 h-3 text-primary-foreground" />
+              )}
+            </div>
+            <div className="flex-1 min-w-0">
+              {updating ? (
+                <>
+                  <h4 className="font-bold text-foreground text-sm mb-1">Installing Update...</h4>
+                  <p className="text-muted-foreground text-xs mb-3">This may take a few moments</p>
+                  <div className="w-full bg-secondary rounded-full h-1.5 mb-2">
+                    <div className="bg-primary h-1.5 rounded-full animate-pulse" />
+                  </div>
+                </>
+              ) : updateInfo ? (
+                <>
+                  <h4 className="font-bold text-foreground text-sm mb-1">Update Available! 🎉</h4>
+                  <p className="text-muted-foreground text-xs mb-3">Version {updateInfo.version} is ready to install</p>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={performUpdate}
+                      className="flex-1 py-2 bg-primary text-primary-foreground text-sm font-medium rounded-lg hover:bg-primary/90 transition-all shadow-md hover:shadow-lg flex items-center justify-center gap-2"
+                    >
+                      <Zap className="w-3 h-3" />
+                      Install Now
+                    </button>
+                    <button
+                      onClick={dismissUpdate}
+                      className="px-3 py-2 text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition-all text-sm"
+                    >
+                      Later
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <h4 className="font-bold text-foreground text-sm mb-1">Update Installed! ✅</h4>
+                  <p className="text-muted-foreground text-xs mb-3">Please restart the app to apply changes</p>
+                  <div className="bg-primary/10 border border-primary/30 rounded-lg p-3">
+                    <p className="text-primary text-xs font-medium text-center">
+                      Close and reopen Mimir to complete the update
+                    </p>
+                  </div>
+                  <div className="flex justify-end mt-3">
+                    <button
+                      onClick={dismissUpdate}
+                      className="px-4 py-2 bg-primary text-primary-foreground text-sm font-medium rounded-lg hover:bg-primary/90 transition-all shadow-md hover:shadow-lg"
+                    >
+                      Got it!
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+            {!updating && (
+              <button
+                onClick={dismissUpdate}
+                className="flex-shrink-0 w-5 h-5 text-muted-foreground hover:text-foreground hover:bg-accent rounded flex items-center justify-center transition-all"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            )}
+          </div>
         </div>
-      </div>
-      <button
-        onClick={dismissUpdate}
-        className="flex-shrink-0 w-5 h-5 text-muted-foreground hover:text-foreground hover:bg-accent rounded flex items-center justify-center transition-all"
-      >
-        <X className="w-3 h-3" />
-      </button>
-    </div>
-  </div>
-)}
-
-{updating && (
-  <div className="fixed top-4 right-4 w-80 bg-card border-2 border-primary/40 rounded-xl p-4 shadow-2xl shadow-primary/20 z-50 backdrop-blur-sm">
-    <div className="flex items-center gap-3">
-      <div className="flex-shrink-0">
-        <Loader2 className="w-5 h-5 text-primary animate-spin" />
-      </div>
-      <div className="flex-1 min-w-0">
-        <h4 className="font-bold text-foreground text-sm mb-1">
-          Installing Update...
-        </h4>
-        <p className="text-muted-foreground text-xs mb-2">
-          This will only take a moment
-        </p>
-        <div className="w-full bg-secondary rounded-full h-1.5">
-          <div className="bg-primary h-1.5 rounded-full animate-pulse" />
-        </div>
-      </div>
-    </div>
-  </div>
-)}
-
-      {/* Your existing UI continues below */}
+      )}
 
       {/* Chat Sidebar */}
       <Drawer open={showChatSidebar} onOpenChange={setShowChatSidebar} direction="left">
         <DrawerContent className="w-80 bg-sidebar/95 backdrop-blur-sm border-r-2 border-sidebar-border">
-          {/* Sidebar Header */}
           <DrawerHeader className="p-4 border-b-2 border-sidebar-border bg-gradient-to-br from-sidebar to-sidebar-accent/30">
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
@@ -1059,7 +1353,6 @@ const handleForgotPassword = async (e: React.FormEvent) => {
               </button>
             </div>
 
-            {/* User Info */}
             <div className="bg-primary/15 border-2 border-primary/40 p-3 rounded-xl shadow-md mb-3">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2 min-w-0">
@@ -1076,7 +1369,6 @@ const handleForgotPassword = async (e: React.FormEvent) => {
               </div>
             </div>
 
-            {/* Current Chat Info */}
             <div className="bg-primary/15 border-2 border-primary/40 p-3 rounded-xl shadow-md">
               <p className="text-xs font-medium text-sidebar-foreground/70">Current Chat</p>
               <p className="text-lg font-bold text-primary truncate">{currentChat}</p>
@@ -1092,7 +1384,6 @@ const handleForgotPassword = async (e: React.FormEvent) => {
             </div>
           </DrawerHeader>
 
-          {/* Chat List */}
           <div className="flex-1 overflow-y-auto">
             {chats.map((chat) => (
               <div
@@ -1136,7 +1427,6 @@ const handleForgotPassword = async (e: React.FormEvent) => {
             ))}
           </div>
 
-          {/* Sidebar Footer */}
           <DrawerFooter className="p-4 border-t-2 border-sidebar-border bg-gradient-to-br from-sidebar to-sidebar-accent/30">
             <button
               onClick={() => setShowChatSidebar(false)}
@@ -1203,6 +1493,7 @@ const handleForgotPassword = async (e: React.FormEvent) => {
 
         <div className="flex-1 overflow-y-auto">
           <div className="max-w-6xl mx-auto p-4 sm:p-6 w-full">
+            
             {/* File Upload Section */}
             <header className="bg-card/90 border-2 border-border rounded-xl p-4 sm:p-6 mb-6 shadow-lg">
               <div
@@ -1218,9 +1509,66 @@ const handleForgotPassword = async (e: React.FormEvent) => {
                 <FileDown
                   className={`w-12 h-12 text-primary mb-4 transition-transform ${isDragging ? "scale-110" : ""}`}
                 />
-                <p className="text-foreground font-semibold text-lg mb-2">Drop your CSV or Excel file here</p>
-                <p className="text-muted-foreground/70 text-xs mt-2">Supports .csv, .xls and .xlsx files</p>
+                <p className="text-foreground font-semibold text-lg mb-2">
+                  Drop your CSV or Excel file here
+                </p>
+                <p className="text-muted-foreground/70 text-xs mt-2">
+                  Supports .csv, .xls and .xlsx files • Drop multiple files to merge them
+                </p>
               </div>
+
+              {/* Uploaded Files List */}
+              {uploadedFiles.length > 0 && (
+                <div className="mt-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h3 className="font-semibold text-foreground">Uploaded Files</h3>
+                    {matchingColumns.length > 0 && (
+                      <button
+                        onClick={() => setShowMergeModal(true)}
+                        className="px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-all font-medium text-sm flex items-center gap-2"
+                      >
+                        <Database className="w-4 h-4" />
+                        Merge Files ({matchingColumns.length} matching columns)
+                      </button>
+                    )}
+                  </div>
+                  
+                  {uploadedFiles.map((file) => (
+                    <div key={file.path} className="bg-gradient-to-br from-primary/15 to-primary/5 border-2 border-primary/30 rounded-xl p-4">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-3 flex-1 min-w-0">
+                          <Database className="w-5 h-5 text-primary flex-shrink-0" />
+                          <div className="min-w-0 flex-1">
+                            <p className="font-bold text-primary truncate">{file.name}</p>
+                            <p className="text-xs text-muted-foreground mt-1">
+                              {file.columns.length} columns • {file.preview.length - 1} rows
+                            </p>
+                            <div className="flex flex-wrap gap-1 mt-2">
+                              {file.columns.slice(0, 4).map((col, idx) => (
+                                <span key={idx} className="px-2 py-1 bg-primary/20 text-primary text-xs rounded-md">
+                                  {col}
+                                </span>
+                              ))}
+                              {file.columns.length > 4 && (
+                                <span className="px-2 py-1 bg-primary/10 text-primary text-xs rounded-md">
+                                  +{file.columns.length - 4} more
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => removeUploadedFile(file.path)}
+                          className="p-2 text-destructive hover:bg-destructive/20 rounded-lg transition-all ml-2"
+                          title="Remove file"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
 
               {/* Current file info */}
               {fileName && (
@@ -1233,6 +1581,9 @@ const handleForgotPassword = async (e: React.FormEvent) => {
                         <p className="text-xs text-muted-foreground mt-1">Ready for analysis</p>
                       </div>
                     </div>
+                    <span className="px-3 py-1 bg-primary/20 text-primary text-sm rounded-full font-medium">
+                      Active Dataset
+                    </span>
                   </div>
                 </div>
               )}
@@ -1340,7 +1691,7 @@ const handleForgotPassword = async (e: React.FormEvent) => {
               value={newChatName}
               onChange={(e) => setNewChatName(e.target.value)}
               placeholder="Enter chat name..."
-              className="w-full px-3 py-2 bg-input border-2 border-border rounded-lg focus:ring-2 focus:ring-primary focus:border-primary mb-4 text-foreground placeholder:text-muted-foreground transition-all shadow-sm"
+              className="w-full px-3 py-2 bg-input border-2 border-border rounded-lg focus:ring-2 focus:ring-primary focus:border-primary text-foreground placeholder:text-muted-foreground transition-all shadow-sm"
               onKeyDown={(e) => e.key === "Enter" && handleCreateChat()}
             />
             <div className="flex gap-2 justify-end">
@@ -1357,6 +1708,248 @@ const handleForgotPassword = async (e: React.FormEvent) => {
               >
                 Create
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Enhanced Merge Files Modal */}
+      {showMergeModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-md flex items-center justify-center z-50 p-4">
+          <div className="bg-card border-2 border-border rounded-xl p-6 w-full max-w-4xl shadow-2xl max-h-[90vh] overflow-y-auto">
+            <h3 className="text-lg font-bold mb-4 text-foreground">Merge Multiple Files</h3>
+            
+            <div className="space-y-6">
+              {/* Primary File Selection */}
+              <div>
+                <label className="block text-sm font-medium text-foreground mb-2">
+                  Primary File (Base Dataset)
+                </label>
+                <div className="flex gap-2 items-start">
+                  <select
+                    value={mergeConfig.primaryFile}
+                    onChange={(e) => {
+                      if (e.target.value) {
+                        setMergeConfig({
+                          primaryFile: e.target.value,
+                          filesToMerge: []
+                        })
+                      } else {
+                        setMergeConfig({
+                          primaryFile: '',
+                          filesToMerge: []
+                        })
+                      }
+                    }}
+                    className="flex-1 px-3 py-2 bg-input border-2 border-border rounded-lg focus:ring-2 focus:ring-primary focus:border-primary text-foreground placeholder:text-muted-foreground"
+                  >
+                    <option value="">Select primary file</option>
+                    {uploadedFiles.map(file => (
+                      <option key={file.path} value={file.path}>
+                        {file.name} ({file.columns.length} columns)
+                      </option>
+                    ))}
+                  </select>
+                  {mergeConfig.primaryFile && (
+                    <button
+                      onClick={() => removeFileFromMerge(mergeConfig.primaryFile)}
+                      className="p-2 text-destructive hover:bg-destructive/20 rounded-lg transition-all"
+                      title="Remove as primary"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Files to Merge Section */}
+              {mergeConfig.primaryFile && (
+                <div>
+                  <div className="flex items-center justify-between mb-4">
+                    <label className="block text-sm font-medium text-foreground">
+                      Files to Merge with Primary
+                    </label>
+                    <div className="text-xs text-muted-foreground">
+                      {uploadedFiles.filter(f => f.path !== mergeConfig.primaryFile && 
+                        !mergeConfig.filesToMerge.some(mf => mf.file_path === f.path)).length} files available
+                    </div>
+                  </div>
+
+                  {/* Available Files to Add */}
+                  {uploadedFiles.filter(f => f.path !== mergeConfig.primaryFile && 
+                    !mergeConfig.filesToMerge.some(mf => mf.file_path === f.path)).length > 0 && (
+                    <div className="mb-4 p-3 bg-primary/10 border border-primary/30 rounded-lg">
+                      <p className="text-sm text-foreground mb-2">Add files to merge:</p>
+                      <div className="flex flex-wrap gap-2">
+                        {uploadedFiles
+                          .filter(f => f.path !== mergeConfig.primaryFile && 
+                            !mergeConfig.filesToMerge.some(mf => mf.file_path === f.path))
+                          .map(file => (
+                            <button
+                              key={file.path}
+                              onClick={() => addFileToMerge(file.path)}
+                              className="px-3 py-1 bg-primary/20 hover:bg-primary/30 text-primary text-sm rounded-lg transition-all flex items-center gap-2"
+                            >
+                              <Plus className="w-3 h-3" />
+                              {file.name}
+                              <span className="text-xs opacity-70">({file.columns.length} cols)</span>
+                            </button>
+                          ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Files Currently Being Merged */}
+                  {mergeConfig.filesToMerge.length > 0 && (
+                    <div className="space-y-4">
+                      {mergeConfig.filesToMerge.map((mergeFile) => {
+                        const file = uploadedFiles.find(f => f.path === mergeFile.file_path)
+                        const matchingColumns = file ? getMatchingColumns(mergeConfig.primaryFile, mergeFile.file_path) : []
+                        
+                        return (
+                          <div key={mergeFile.file_path} className="border-2 border-border rounded-lg p-4 bg-secondary/20">
+                            <div className="flex items-start justify-between mb-3">
+                              <div className="flex-1">
+                                <h4 className="font-medium text-foreground text-sm mb-1">
+                                  {file?.name}
+                                </h4>
+                                <p className="text-xs text-muted-foreground">
+                                  {file?.columns.length} columns • {matchingColumns.length} matching columns
+                                </p>
+                              </div>
+                              <button
+                                onClick={() => removeFileFromMerge(mergeFile.file_path)}
+                                className="p-1 text-destructive hover:bg-destructive/20 rounded transition-all ml-2"
+                                title="Remove from merge"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-3">
+                              <div>
+                                <label className="block text-xs font-medium text-foreground mb-1">
+                                  Merge Column
+                                </label>
+                                <select
+                                  value={mergeFile.merge_column}
+                                  onChange={(e) => updateMergeConfigForFile(mergeFile.file_path, { 
+                                    merge_column: e.target.value 
+                                  })}
+                                  className="w-full px-2 py-1 bg-input border border-border rounded text-xs text-foreground focus:ring-1 focus:ring-primary focus:border-primary"
+                                >
+                                  <option value="">Select column</option>
+                                  {matchingColumns.map(col => (
+                                    <option key={col} value={col}>
+                                      {col}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                              
+                              <div>
+                                <label className="block text-xs font-medium text-foreground mb-1">
+                                  Merge Type
+                                </label>
+                                <select
+                                  value={mergeFile.merge_type}
+                                  onChange={(e) => updateMergeConfigForFile(mergeFile.file_path, { 
+                                    merge_type: e.target.value as any 
+                                  })}
+                                  className="w-full px-2 py-1 bg-input border border-border rounded text-xs text-foreground focus:ring-1 focus:ring-primary focus:border-primary"
+                                >
+                                  <option value="inner">Inner Join</option>
+                                  <option value="left">Left Join</option>
+                                  <option value="right">Right Join</option>
+                                  <option value="outer">Full Outer Join</option>
+                                </select>
+                              </div>
+                            </div>
+
+                            {/* Column Preview */}
+                            {file && (
+                              <div className="mt-3">
+                                <details className="text-xs">
+                                  <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
+                                    View columns ({file.columns.length})
+                                  </summary>
+                                  <div className="mt-2 flex flex-wrap gap-1">
+                                    {file.columns.map((col, idx) => (
+                                      <span
+                                        key={idx}
+                                        className={`px-2 py-1 rounded text-xs ${
+                                          matchingColumns.includes(col)
+                                            ? 'bg-primary/20 text-primary'
+                                            : 'bg-secondary/50 text-muted-foreground'
+                                        }`}
+                                      >
+                                        {col}
+                                      </span>
+                                    ))}
+                                  </div>
+                                </details>
+                              </div>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+
+                  {/* No files selected message */}
+                  {mergeConfig.filesToMerge.length === 0 && (
+                    <div className="text-center py-8 text-muted-foreground border-2 border-dashed border-border rounded-lg">
+                      <Database className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                      <p className="text-sm">No files selected for merging</p>
+                      <p className="text-xs mt-1">Click on files above to add them</p>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Summary */}
+              {mergeConfig.primaryFile && mergeConfig.filesToMerge.length > 0 && (
+                <div className="bg-primary/10 border border-primary/30 rounded-lg p-4">
+                  <h4 className="font-medium text-foreground text-sm mb-2">Merge Summary</h4>
+                  <div className="text-xs space-y-1">
+                    <p>Primary file: <strong>{uploadedFiles.find(f => f.path === mergeConfig.primaryFile)?.name}</strong></p>
+                    <p>Merging with: <strong>{mergeConfig.filesToMerge.length} file(s)</strong></p>
+                    <p>Total files: <strong>{mergeConfig.filesToMerge.length + 1}</strong></p>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="flex gap-2 justify-between items-center mt-6">
+              <div className="text-sm text-muted-foreground">
+                {mergeConfig.filesToMerge.length > 0 && (
+                  <>Merging {mergeConfig.filesToMerge.length + 1} files</>
+                )}
+              </div>
+              
+              <div className="flex gap-2">
+                <button
+                  onClick={() => {
+                    setShowMergeModal(false)
+                    setMergeConfig({
+                      primaryFile: '',
+                      filesToMerge: []
+                    })
+                  }}
+                  className="px-4 py-2 text-muted-foreground hover:bg-accent rounded-lg transition-all shadow-sm hover:shadow-md"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleMergeFiles}
+                  disabled={!mergeConfig.primaryFile || mergeConfig.filesToMerge.length === 0 || 
+                    mergeConfig.filesToMerge.some(f => !f.merge_column)}
+                  className="px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-all font-bold shadow-md hover:shadow-lg flex items-center gap-2"
+                >
+                  <Database className="w-4 h-4" />
+                  Merge {mergeConfig.filesToMerge.length + 1} Files
+                </button>
+              </div>
             </div>
           </div>
         </div>
