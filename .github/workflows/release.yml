@@ -33,6 +33,18 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Generate Python Virtual Environments
+        run: |
+          cd src-tauri/resources/python
+          chmod +x create-venvs.sh
+          ./create-venvs.sh
+          cd ../../..
+
       - name: Install Tauri CLI
         run: cargo install tauri-cli
 
@@ -68,6 +80,17 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Generate Python Virtual Environments
+        run: |
+          cd src-tauri/resources/python
+          .\create-venvs.ps1
+          cd ../../..
+
       - name: Install Tauri CLI
         run: cargo install tauri-cli
 
@@ -102,6 +125,18 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-apple-darwin
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Generate Python Virtual Environments
+        run: |
+          cd src-tauri/resources/python
+          chmod +x create-venvs.sh
+          ./create-venvs.sh
+          cd ../../..
 
       - name: Install Tauri CLI
         run: cargo install tauri-cli

@@ -11,7 +11,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_updater;
 
 // Global API URL constant
-const API_BASE_URL: &str = "http://localhost:8080";
+const API_BASE_URL: &str = "https://api.mimiranalysis.com";
 
 fn log_to_frontend(app_handle: &AppHandle, message: &str) {
     if let Some(window) = app_handle.get_webview_window("main") {
@@ -461,7 +461,10 @@ async fn start_python_service(
     let analyzer_path = get_python_analyzer_path(&app_handle)
         .map_err(|e| format!("Failed to get Python analyzer path: {}", e))?;
 
-    let mut command = Command::new("python");
+    let (python_bin, _) = get_python_paths(&app_handle)
+        .map_err(|e| format!("Failed to get Python paths: {}", e))?;
+
+    let mut command = Command::new(&python_bin);
     command.arg(&analyzer_path);
     command.stdin(Stdio::piped());
     command.stdout(Stdio::piped());
@@ -615,9 +618,13 @@ async fn analyze_query(
 #[tauri::command]
 async fn load_csv_info(
     csv_path: String,
+    app_handle: tauri::AppHandle,  // Add app_handle as parameter
 ) -> Result<Vec<Vec<String>>, String> {
     use std::path::Path;
     use std::process::Command;
+
+    let (python_bin, _) = get_python_paths(&app_handle)
+        .map_err(|e| format!("Failed to get Python paths: {}", e))?;
 
     let ext = Path::new(&csv_path)
         .extension()
@@ -653,7 +660,7 @@ except Exception as e:
         read_cmd
     );
 
-    let output = Command::new("python")
+    let output = Command::new(&python_bin)
         .arg("-c")
         .arg(python_code)
         .output()
@@ -670,6 +677,8 @@ except Exception as e:
     serde_json::from_str(&stdout).map_err(|e| format!("Failed to parse JSON output: {}", e))
 }
 
+// ========== UPDATED PYTHON PATH DETECTION ==========
+
 fn get_python_paths(app_handle: &AppHandle) -> Result<(String, String), String> {
     let resource_dir = app_handle
         .path()
@@ -682,10 +691,18 @@ fn get_python_paths(app_handle: &AppHandle) -> Result<(String, String), String> 
         return Err("Python directory not found in resources".to_string());
     }
 
+    // Determine which venv to use based on the current OS
+    let venv_dir = match std::env::consts::OS {
+        "windows" => python_dir.join("windows-venv"),
+        "linux" => python_dir.join("linux-venv"),
+        "macos" => python_dir.join("macos-venv"),
+        other => return Err(format!("Unsupported operating system: {}", other)),
+    };
+
     let venv_python_bin = if cfg!(target_os = "windows") {
-        python_dir.join("venv/Scripts/python.exe")
+        venv_dir.join("Scripts/python.exe")
     } else {
-        python_dir.join("venv/bin/python")
+        venv_dir.join("bin/python")
     };
 
     let analyzer_path = python_dir.join("analyzer.py");
@@ -694,26 +711,32 @@ fn get_python_paths(app_handle: &AppHandle) -> Result<(String, String), String> 
         return Err(format!("Analyzer script not found at: {:?}", analyzer_path));
     }
 
-    let python_bin = if venv_python_bin.exists() {
-        venv_python_bin.to_string_lossy().to_string()
-    } else {
-        println!(
-            "Virtual environment Python not found at {:?}, falling back to system Python",
-            venv_python_bin
-        );
-
-        if cfg!(target_os = "windows") {
-            find_system_python().map_err(|e| format!("Failed to find system Python: {}", e))?
-        } else {
-            "python3".to_string()
-        }
-    };
-
-    if !verify_python_command(&python_bin) {
-        return Err(format!("Python command '{}' is not working. Please ensure Python is installed and in your PATH.", python_bin));
+    // First try the bundled venv
+    if venv_python_bin.exists() {
+        println!("Using bundled Python at: {:?}", venv_python_bin);
+        return Ok((
+            venv_python_bin.to_string_lossy().to_string(),
+            analyzer_path.to_string_lossy().to_string(),
+        ));
     }
 
-    Ok((python_bin, analyzer_path.to_string_lossy().to_string()))
+    // Fallback to system Python if bundled venv not found
+    println!(
+        "Bundled virtual environment not found at {:?}, falling back to system Python",
+        venv_python_bin
+    );
+
+    let system_python = if cfg!(target_os = "windows") {
+        find_system_python().map_err(|e| format!("Failed to find system Python: {}", e))?
+    } else {
+        "python3".to_string()
+    };
+
+    if !verify_python_command(&system_python) {
+        return Err(format!("Python command '{}' is not working. Please ensure Python is installed and in your PATH.", system_python));
+    }
+
+    Ok((system_python, analyzer_path.to_string_lossy().to_string()))
 }
 
 fn find_system_python() -> Result<String, String> {
@@ -1041,13 +1064,16 @@ async fn request_password_reset(app_handle: AppHandle, email: String) -> Result<
 #[tauri::command]
 async fn merge_files(
     primary_path: String,
+    app_handle: tauri::AppHandle,  // Add app_handle as parameter
     secondary_path: String,
     merge_column: String,
     merge_type: String, // "inner", "left", "right", "outer"
 ) -> Result<String, String> {
     use std::process::Command;
-    use std::path::Path;
     use uuid::Uuid;
+
+    let (python_bin, _) = get_python_paths(&app_handle)
+        .map_err(|e| format!("Failed to get Python paths: {}", e))?;
 
     let output_dir = std::env::temp_dir();
     let output_filename = format!("merged_{}.csv", Uuid::new_v4());
@@ -1089,7 +1115,7 @@ except Exception as e:
         output_path.to_string_lossy()
     );
 
-    let output = Command::new("python")
+    let output = Command::new(&python_bin)
         .arg("-c")
         .arg(python_code)
         .output()
@@ -1114,10 +1140,14 @@ except Exception as e:
 async fn merge_multiple_files(
     primary_path: String,
     merge_configs: Vec<MergeConfig>,
+    app_handle: tauri::AppHandle,  // Add app_handle as parameter
 ) -> Result<String, String> {
     use std::process::Command;
     use std::path::Path;
     use uuid::Uuid;
+
+    let (python_bin, _) = get_python_paths(&app_handle)
+        .map_err(|e| format!("Failed to get Python paths: {}", e))?;
 
     let output_dir = std::env::temp_dir();
     let output_filename = format!("merged_{}.csv", Uuid::new_v4());
@@ -1196,7 +1226,7 @@ except Exception as e:
 
     println!("Executing Python code:\n{}", python_code);
 
-    let output = Command::new("python")
+    let output = Command::new(&python_bin)
         .arg("-c")
         .arg(python_code)
         .output()

@@ -5,9 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "check-deps": "node check-dependencies.cjs",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri"
+
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.939.0",

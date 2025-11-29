@@ -1,6 +1,7 @@
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import fs from "fs";
 import path from "path";
+import { execSync } from "child_process";
 
 const s3 = new S3Client({
   region: "eu-north-1",
@@ -93,6 +94,19 @@ async function uploadFileToS3(filePath, key) {
   return key;
 }
 
+// Upload directory recursively to S3
+async function uploadDirectoryToS3(localPath, s3Prefix) {
+  const files = getBuildFiles(localPath);
+  
+  for (const file of files) {
+    const relativePath = path.relative(localPath, file);
+    const s3Key = path.join(s3Prefix, relativePath).replace(/\\/g, '/');
+    
+    await uploadFileToS3(file, s3Key);
+    console.log(`  Uploaded: ${s3Key}`);
+  }
+}
+
 // Read signature from .sig file
 function readSignature(signaturePath) {
   if (fs.existsSync(signaturePath)) {
@@ -145,13 +159,13 @@ async function main() {
       console.log(`  Signature: ${fileInfo.signaturePath}`);
       
       // Upload the main file
-      const fileKey = `updates/${platformName}/${path.basename(fileInfo.filePath)}`;
+      const fileKey = `releases/${version}/${platformName}/${path.basename(fileInfo.filePath)}`;
       await uploadFileToS3(fileInfo.filePath, fileKey);
       console.log(`  Uploaded to: ${fileKey}`);
       
       // Upload the signature file if it exists
       if (fs.existsSync(fileInfo.signaturePath)) {
-        const sigKey = `updates/${platformName}/${path.basename(fileInfo.signaturePath)}`;
+        const sigKey = `releases/${version}/${platformName}/${path.basename(fileInfo.signaturePath)}`;
         await uploadFileToS3(fileInfo.signaturePath, sigKey);
         console.log(`  Signature uploaded to: ${sigKey}`);
       }
@@ -166,6 +180,15 @@ async function main() {
         };
         console.log(`  Added to latest.json for platform: ${platform}`);
       }
+    }
+
+    // Upload Python virtual environments for this platform
+    console.log(`\nUploading Python virtual environment for ${platformName}...`);
+    const venvPath = path.join(platformDir, 'python');
+    if (fs.existsSync(venvPath)) {
+      await uploadDirectoryToS3(venvPath, `releases/${version}/${platformName}/python`);
+    } else {
+      console.log(`  No Python virtual environment found at ${venvPath}`);
     }
   }
 
