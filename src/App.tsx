@@ -1725,7 +1725,7 @@ export default function MimirApp() {
           <DrawerHeader className="p-4 border-b border-sidebar-border">
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
-                <div className="w-10 h-10  rounded flex items-center justify-center">
+                <div className="w-10 h-10 rounded flex items-center justify-center">
                   <img src={logoPath} alt="Mimir" />
                 </div>
                 <DrawerTitle className="text-lg font-bold text-sidebar-foreground">Mimir</DrawerTitle>
@@ -1741,13 +1741,13 @@ export default function MimirApp() {
 
             <div className="bg-primary/10 border border-primary/20 p-3 rounded-lg mb-3">
               <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2 min-w-0">
+                <div className="flex items-center gap-2 min-w-0 flex-1">
                   <User className="w-4 h-4 text-primary flex-shrink-0" />
                   <span className="text-sm font-medium text-sidebar-foreground truncate">{username}</span>
                 </div>
                 <button
                   onClick={handleLogout}
-                  className="p-1.5 text-sidebar-foreground/60 hover:text-destructive transition-colors cursor-pointer"
+                  className="p-1.5 text-sidebar-foreground/60 hover:text-destructive transition-colors cursor-pointer flex-shrink-0"
                   title="Logout"
                 >
                   <LogOut className="w-4 h-4" />
@@ -1763,8 +1763,8 @@ export default function MimirApp() {
               </p>
               {csvPath && (
                 <p className="text-xs text-primary/90 mt-1 truncate flex items-center gap-1" title={csvPath}>
-                  <Database className="w-3 h-3" />
-                  {fileName}
+                  <Database className="w-3 h-3 flex-shrink-0" />
+                  <span className="truncate block max-w-52 overflow-hidden text-ellipsis whitespace-nowrap">{fileName}</span>
                 </p>
               )}
             </div>
@@ -1782,9 +1782,9 @@ export default function MimirApp() {
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2 flex-1 min-w-0">
                     <MessageSquare className="w-4 h-4 text-sidebar-foreground/60 flex-shrink-0" />
-                    <span className="font-medium text-sidebar-foreground truncate">{chat.name}</span>
+                    <span className="font-medium text-sidebar-foreground truncate block overflow-hidden text-ellipsis whitespace-nowrap">{chat.name}</span>
                   </div>
-                  <div className="flex items-center gap-1">
+                  <div className="flex items-center gap-1 flex-shrink-0">
                     <span className="text-xs text-sidebar-foreground/60 bg-sidebar-accent px-2 py-1 rounded shadow-sm">
                       {chat.message_count}
                     </span>
@@ -1805,8 +1805,8 @@ export default function MimirApp() {
                 </p>
                 {chat.csv_path && (
                   <p className="text-xs text-primary/80 mt-1 truncate flex items-center gap-1" title={chat.csv_path}>
-                    <Database className="w-3 h-3" />
-                    {chat.csv_path.split(/[\\/]/).pop()}
+                    <Database className="w-3 h-3 flex-shrink-0" />
+                    <span className="truncate block overflow-hidden text-ellipsis whitespace-nowrap">{chat.csv_path.split(/[\\/]/).pop()}</span>
                   </p>
                 )}
               </div>
@@ -1866,12 +1866,12 @@ export default function MimirApp() {
               <div className="text-sm text-muted-foreground flex items-center gap-2 sm:gap-4 min-w-0">
                 <span className="flex items-center gap-2 min-w-0">
                   <MessageSquare className="w-4 h-4 text-primary flex-shrink-0" />
-                  <span className="font-semibold text-primary truncate hidden sm:inline">{currentChat}</span>
+                  <span className="font-semibold text-primary truncate hidden sm:inline block overflow-hidden text-ellipsis whitespace-nowrap max-w-[120px]">{currentChat}</span>
                 </span>
                 {csvPath && (
                   <span className="flex items-center gap-2 min-w-0">
                     <Database className="w-4 h-4 text-primary flex-shrink-0" />
-                    <span className="font-semibold text-primary truncate hidden md:inline">{fileName}</span>
+                    <span className="font-semibold text-primary truncate hidden md:inline block overflow-hidden text-ellipsis whitespace-nowrap max-w-[150px]">{fileName}</span>
                   </span>
                 )}
               </div>
@@ -1928,7 +1928,7 @@ export default function MimirApp() {
                         <div className="flex items-center gap-3 flex-1 min-w-0">
                           <Database className="w-5 h-5 text-primary flex-shrink-0" />
                           <div className="min-w-0 flex-1">
-                            <p className="font-bold text-primary truncate">{file.name}</p>
+                            <p className="font-bold text-primary truncate block overflow-hidden text-ellipsis whitespace-nowrap">{file.name}</p>
                             <p className="text-sm text-muted-foreground mt-1">
                               {file.columns.length} columns • {file.preview.length - 1} rows
                             </p>
@@ -1965,12 +1965,12 @@ export default function MimirApp() {
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-3">
                       <Database className="w-5 h-5 text-primary" />
-                      <div>
-                        <p className="font-bold text-primary">{fileName}</p>
+                      <div className="min-w-0 flex-1">
+                        <p className="font-bold text-primary truncate block overflow-hidden text-ellipsis whitespace-nowrap">{fileName}</p>
                         <p className="text-sm text-muted-foreground mt-1">Ready for analysis</p>
                       </div>
                     </div>
-                    <span className="px-3 py-1 bg-primary/20 text-primary text-sm rounded-full font-medium">
+                    <span className="px-3 py-1 bg-primary/20 text-primary text-sm rounded-full font-medium flex-shrink-0">
                       Active Dataset
                     </span>
                   </div>
@@ -2205,7 +2205,7 @@ export default function MimirApp() {
                           <div key={mergeFile.file_path} className="border rounded-lg p-4 bg-secondary/20">
                             <div className="flex items-start justify-between mb-3">
                               <div className="flex-1">
-                                <h4 className="font-medium text-foreground text-sm mb-1">
+                                <h4 className="font-medium text-foreground text-sm mb-1 truncate block overflow-hidden text-ellipsis whitespace-nowrap">
                                   {file?.name}
                                 </h4>
                                 <p className="text-xs text-muted-foreground">
