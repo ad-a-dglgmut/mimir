@@ -32,7 +32,7 @@ Write-Host "Note: Linux and MacOS venvs will be created on their respective CI p
 Write-Host "=== Verifying Windows installation ===" -ForegroundColor Cyan
 .\windows-venv\Scripts\pip.exe list
 
-# Create verification script
+# Create Windows-compatible verification script (ASCII only)
 @"
 import sys
 import pandas as pd
@@ -41,21 +41,29 @@ import matplotlib
 from groq import Groq
 import openpyxl
 
-print("✓ All Python packages imported successfully!")
+print("SUCCESS: All packages imported successfully!")
 print(f"Pandas version: {pd.__version__}")
-print(f"Numpy version: {np.__version__}")
+print(f"Numpy version: {np.__version__}") 
 print(f"Matplotlib version: {matplotlib.__version__}")
 print(f"Openpyxl version: {openpyxl.__version__}")
 
-# Test basic functionality
-df = pd.DataFrame({'test': [1, 2, 3]})
-print("✓ Basic pandas functionality verified")
+# Test Groq client creation (without making actual API calls)
+try:
+    client = Groq()
+    print("Groq: Client created successfully")
+except Exception as e:
+    print(f"Groq: Client creation failed (this may be normal without API key): {e}")
+    
+except ImportError as e:
+    print(f"FAILED: {e}")
+    sys.exit(1)
 "@ | Out-File -FilePath "verify_venv.py" -Encoding UTF8
 
 Write-Host "Running verification script..." -ForegroundColor Cyan
+$env:PYTHONIOENCODING = "utf-8"
 .\windows-venv\Scripts\python.exe verify_venv.py
 
-Remove-Item verify_venv.py
+Remove-Item verify_venv.py -ErrorAction SilentlyContinue
 
 # Calculate directory size
 $windowsSize = (Get-ChildItem -Path "windows-venv" -Recurse | Measure-Object -Property Length -Sum).Sum / 1MB

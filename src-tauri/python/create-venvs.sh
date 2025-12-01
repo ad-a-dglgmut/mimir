@@ -39,19 +39,19 @@ python3 -m venv windows-venv
 ./windows-venv/bin/pip install --upgrade pip
 ./windows-venv/bin/pip install -r requirements.txt
 
-# Verify installations
+# Verify installations with ASCII-only output
 echo "=== Verifying installations ==="
 echo "Linux Python packages:"
-./linux-venv/bin/pip list
+./linux-venv/bin/pip list | head -20
 
 echo "MacOS Python packages:"
-./macos-venv/bin/pip list
+./macos-venv/bin/pip list | head -20
 
 echo "Windows Python packages:"
-./windows-venv/bin/pip list
+./windows-venv/bin/pip list | head -20
 
-# Create a verification script
-cat > verify_venv.py << EOF
+# Create ASCII-only verification script
+cat > verify_venv.py << 'EOF'
 #!/usr/bin/env python3
 import sys
 import pandas as pd
@@ -60,20 +60,30 @@ import matplotlib
 from groq import Groq
 import openpyxl
 
-print("✓ All Python packages imported successfully!")
+print("SUCCESS: All packages imported successfully!")
 print(f"Pandas version: {pd.__version__}")
-print(f"Numpy version: {np.__version__}")
+print(f"Numpy version: {np.__version__}") 
 print(f"Matplotlib version: {matplotlib.__version__}")
 print(f"Openpyxl version: {openpyxl.__version__}")
 
+# Test Groq client creation (without making actual API calls)
+try:
+    client = Groq()
+    print("Groq: Client created successfully")
+except Exception as e:
+    print(f"Groq: Client creation failed (this may be normal without API key): {e}")
+
 # Test basic functionality
 df = pd.DataFrame({'test': [1, 2, 3]})
-print("✓ Basic pandas functionality verified")
+print("Basic pandas functionality verified")
 EOF
 
 echo "Running verification script..."
+echo "=== Linux ==="
 ./linux-venv/bin/python verify_venv.py
-./macos-venv/bin/python verify_venv.py  
+echo "=== MacOS ==="  
+./macos-venv/bin/python verify_venv.py
+echo "=== Windows ==="
 ./windows-venv/bin/python verify_venv.py
 
 rm verify_venv.py
