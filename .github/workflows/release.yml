@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
+      
       - name: Install Linux dependencies
         run: |
           sudo apt update
@@ -88,7 +88,10 @@ jobs:
       - name: Generate Python Virtual Environments
         run: |
           cd src-tauri/python
-          .\create-venvs.ps1
+          # On Windows CI, create Windows venv using system Python
+          python -m venv windows-venv
+          .\windows-venv\Scripts\pip install --upgrade pip
+          .\windows-venv\Scripts\pip install -r requirements.txt
           cd ../../..
 
       - name: Install Tauri CLI
@@ -131,11 +134,21 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Generate Python Virtual Environments
+      - name: Generate macOS Python Virtual Environment
         run: |
           cd src-tauri/python
-          chmod +x create-venvs.sh
-          ./create-venvs.sh
+          # Create the portable macOS venv
+          chmod +x create-macos-venv.sh
+          ./create-macos-venv.sh
+          
+          # Verify it works
+          echo "Verifying macOS venv..."
+          if ./macos-venv/bin/python -c "import pandas, numpy, groq, matplotlib; print('All packages work')"; then
+            echo "✓ macOS venv verified"
+          else
+            echo "✗ macOS venv verification failed"
+            exit 1
+          fi
           cd ../../..
 
       - name: Install Tauri CLI

@@ -687,11 +687,6 @@ fn get_python_paths(app_handle: &AppHandle) -> Result<(String, String), String> 
 
     let python_dir = resource_dir.join("python");
 
-    if !python_dir.exists() {
-        return Err("Python directory not found in resources".to_string());
-    }
-
-    // Determine which venv to use based on the current OS
     let venv_dir = match std::env::consts::OS {
         "windows" => python_dir.join("windows-venv"),
         "linux" => python_dir.join("linux-venv"),
@@ -699,103 +694,42 @@ fn get_python_paths(app_handle: &AppHandle) -> Result<(String, String), String> 
         other => return Err(format!("Unsupported operating system: {}", other)),
     };
 
-    let venv_python_bin = if cfg!(target_os = "windows") {
+    // Platform-specific Python binary paths
+    let python_bin = if cfg!(target_os = "windows") {
         venv_dir.join("Scripts/python.exe")
     } else {
+        // Linux and macOS use the same structure with our custom macOS script
         venv_dir.join("bin/python")
     };
 
     let analyzer_path = python_dir.join("analyzer.py");
 
-    if !analyzer_path.exists() {
-        return Err(format!("Analyzer script not found at: {:?}", analyzer_path));
+    if !python_bin.exists() {
+        return Err(format!("Python binary not found at: {:?}", python_bin));
     }
 
-    // First try the bundled venv
-    if venv_python_bin.exists() {
-        println!("Using bundled Python at: {:?}", venv_python_bin);
-        return Ok((
-            venv_python_bin.to_string_lossy().to_string(),
-            analyzer_path.to_string_lossy().to_string(),
-        ));
-    }
-
-    // Fallback to system Python if bundled venv not found
-    println!(
-        "Bundled virtual environment not found at {:?}, falling back to system Python",
-        venv_python_bin
-    );
-
-    let system_python = if cfg!(target_os = "windows") {
-        find_system_python().map_err(|e| format!("Failed to find system Python: {}", e))?
-    } else {
-        "python3".to_string()
-    };
-
-    if !verify_python_command(&system_python) {
-        return Err(format!("Python command '{}' is not working. Please ensure Python is installed and in your PATH.", system_python));
-    }
-
-    Ok((system_python, analyzer_path.to_string_lossy().to_string()))
-}
-
-fn find_system_python() -> Result<String, String> {
-    let commands = ["python", "python3", "py"];
-
-    for cmd in commands.iter() {
-        if verify_python_command(cmd) {
-            println!("Found working Python command: {}", cmd);
-            return Ok(cmd.to_string());
+    // Test if Python works
+    let test_output = std::process::Command::new(&python_bin)
+        .arg("-c")
+        .arg("import pandas; print('Pandas available')")
+        .output();
+        
+    match test_output {
+        Ok(output) if output.status.success() => {
+            println!("✓ Python venv verified");
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            println!("✗ Python venv test failed: {}", stderr);
+            return Err(format!("Python virtual environment is broken: {}", stderr));
+        }
+        Err(e) => {
+            return Err(format!("Failed to run Python: {}", e));
         }
     }
 
-    if let Some(install_path) = find_python_in_program_files() {
-        println!("Found Python installation at: {}", install_path);
-        return Ok(install_path);
-    }
-
-    Err("Could not find a working Python installation. Please install Python and ensure it's in your PATH.".to_string())
-}
-
-fn verify_python_command(command: &str) -> bool {
-    let output = Command::new(command).arg("--version").output();
-
-    match output {
-        Ok(output) => output.status.success(),
-        Err(_) => false,
-    }
-}
-
-fn find_python_in_program_files() -> Option<String> {
-    let possible_paths = [
-        r"C:\Program Files\Python311\python.exe",
-        r"C:\Program Files\Python310\python.exe",
-        r"C:\Program Files\Python39\python.exe",
-        r"C:\Program Files\Python38\python.exe",
-        r"C:\Program Files (x86)\Python311\python.exe",
-        r"C:\Program Files (x86)\Python310\python.exe",
-        r"C:\Program Files (x86)\Python39\python.exe",
-        r"C:\Program Files (x86)\Python38\python.exe",
-        r"C:\Users\*\AppData\Local\Programs\Python\Python311\python.exe",
-        r"C:\Users\*\AppData\Local\Programs\Python\Python310\python.exe",
-        r"C:\Users\*\AppData\Local\Programs\Python\Python39\python.exe",
-        r"C:\Users\*\AppData\Local\Programs\Python\Python38\python.exe",
-    ];
-
-    for path_pattern in possible_paths.iter() {
-        if path_pattern.contains('*') {
-            if let Some(home_dir) = dirs::home_dir() {
-                let path = path_pattern.replace('*', &home_dir.to_string_lossy());
-                if std::path::Path::new(&path).exists() {
-                    return Some(path);
-                }
-            }
-        } else if std::path::Path::new(path_pattern).exists() {
-            return Some(path_pattern.to_string());
-        }
-    }
-
-    None
+    Ok((python_bin.to_string_lossy().to_string(), 
+        analyzer_path.to_string_lossy().to_string()))
 }
 
 fn get_python_analyzer_path(app_handle: &AppHandle) -> Result<String, String> {
