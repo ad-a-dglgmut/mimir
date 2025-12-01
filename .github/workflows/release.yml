@@ -134,21 +134,17 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Install venv-pack
+        run: pip install venv-pack
+
       - name: Generate macOS Python Virtual Environment
         run: |
           cd src-tauri/python
-          # Create the portable macOS venv
-          chmod +x create-macos-venv.sh
-          ./create-macos-venv.sh
           
-          # Verify it works
-          echo "Verifying macOS venv..."
-          if ./macos-venv/bin/python -c "import pandas, numpy, groq, matplotlib; print('All packages work')"; then
-            echo "✓ macOS venv verified"
-          else
-            echo "✗ macOS venv verification failed"
-            exit 1
-          fi
+          # Use the venv-pack based script
+          chmod +x create-macos-venv-venvpack.sh
+          ./create-macos-venv-venvpack.sh
+          
           cd ../../..
 
       - name: Install Tauri CLI
@@ -157,7 +153,7 @@ jobs:
       - name: Build frontend
         run: npm run build
 
-      - name: Build Tauri app (macOS) - Skip DMG
+      - name: Build Tauri app (macOS)
         run: npm run tauri build -- --target x86_64-apple-darwin --bundles app
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
