@@ -40,7 +40,7 @@ jobs:
 
       - name: Generate Python Virtual Environments
         run: |
-          cd src-tauri/resources/python
+          cd src-tauri/python
           chmod +x create-venvs.sh
           ./create-venvs.sh
           cd ../../..
@@ -87,7 +87,7 @@ jobs:
 
       - name: Generate Python Virtual Environments
         run: |
-          cd src-tauri/resources/python
+          cd src-tauri/python
           .\create-venvs.ps1
           cd ../../..
 
@@ -133,7 +133,7 @@ jobs:
 
       - name: Generate Python Virtual Environments
         run: |
-          cd src-tauri/resources/python
+          cd src-tauri/python
           chmod +x create-venvs.sh
           ./create-venvs.sh
           cd ../../..
