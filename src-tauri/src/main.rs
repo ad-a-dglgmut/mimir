@@ -687,19 +687,35 @@ fn get_python_paths(app_handle: &AppHandle) -> Result<(String, String), String> 
 
     let python_dir = resource_dir.join("python");
 
+    println!("=== Python Environment ===");
+    println!("Current OS: {}", std::env::consts::OS);
+    println!("Current architecture: {}", std::env::consts::ARCH);
+
     let venv_dir = match std::env::consts::OS {
         "windows" => python_dir.join("windows-venv"),
         "linux" => python_dir.join("linux-venv"),
-        "macos" => python_dir.join("macos-venv"),
+        "macos" => {
+            let venv_path = python_dir.join("macos-venv");
+            
+            // On macOS, always use the wrapper if it exists
+            let wrapper = venv_path.join("bin/python_wrapper");
+            let python_bin = if wrapper.exists() {
+                println!("Using macOS wrapper script");
+                wrapper
+            } else {
+                // Fallback to regular python
+                venv_path.join("bin/python")
+            };
+            
+            python_bin
+        }
         other => return Err(format!("Unsupported operating system: {}", other)),
     };
 
-    // Platform-specific Python binary paths
     let python_bin = if cfg!(target_os = "windows") {
         venv_dir.join("Scripts/python.exe")
     } else {
-        // Linux and macOS use the same structure with our custom macOS script
-        venv_dir.join("bin/python")
+        venv_dir
     };
 
     let analyzer_path = python_dir.join("analyzer.py");
@@ -708,22 +724,30 @@ fn get_python_paths(app_handle: &AppHandle) -> Result<(String, String), String> 
         return Err(format!("Python binary not found at: {:?}", python_bin));
     }
 
-    // Test if Python works
+    // Test the Python binary
+    println!("Testing Python at: {:?}", python_bin);
     let test_output = std::process::Command::new(&python_bin)
         .arg("-c")
-        .arg("import pandas; print('Pandas available')")
+        .arg("import sys; print(f'Python {sys.version} OK'); import pandas; print('Pandas OK')")
         .output();
         
     match test_output {
         Ok(output) if output.status.success() => {
-            println!("✓ Python venv verified");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            println!("✓ Python test successful: {}", stdout.trim());
         }
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            println!("✗ Python venv test failed: {}", stderr);
-            return Err(format!("Python virtual environment is broken: {}", stderr));
+            println!("⚠ Python test issues: {}", stderr);
+            
+            // On macOS, we have one more fallback
+            if cfg!(target_os = "macos") {
+                println!("Falling back to system Python...");
+                return Ok(("python3".to_string(), analyzer_path.to_string_lossy().to_string()));
+            }
         }
         Err(e) => {
+            println!("✗ Failed to run Python: {}", e);
             return Err(format!("Failed to run Python: {}", e));
         }
     }

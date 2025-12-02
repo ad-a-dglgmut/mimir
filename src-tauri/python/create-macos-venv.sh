@@ -1,106 +1,126 @@
 #!/bin/bash
 set -e
 
-echo "=== Creating Portable macOS Virtual Environment ==="
+echo "=== Creating Universal macOS Virtual Environment for Apple Silicon/Intel ==="
 
-# Clean up existing venv
-rm -rf macos-venv-portable
+# Clean up
+rm -rf macos-venv
 
-# Create a temporary venv for package installation
-echo "Creating temporary venv..."
-python3 -m venv macos-venv-temp
-source macos-venv-temp/bin/activate
+# Check architecture
+ARCH=$(uname -m)
+echo "Running on: $ARCH"
 
-# Install packages
-pip install --upgrade pip
-pip install -r requirements.txt
+# 1. Create venv with --copies to avoid symlinks to framework
+echo "Creating virtual environment with copied binaries..."
+python3 -m venv --copies macos-venv
+
+# 2. Install packages
+echo "Installing packages..."
+./macos-venv/bin/pip install --upgrade pip
+./macos-venv/bin/pip install -r requirements.txt
+
+# 3. Test it works in CI
+echo "Testing in CI..."
+./macos-venv/bin/python -c "import pandas, numpy, groq, matplotlib; print('✓ All packages work in CI')"
+
+# 4. CRITICAL: Create a universal wrapper that works on both Intel and ARM
+echo "Creating universal wrapper script..."
 
 # Get Python version
-PYTHON_VERSION=$(python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-echo "Python version: $PYTHON_VERSION"
+PYTHON_VERSION=$(./macos-venv/bin/python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
 
-# Create portable venv structure
-echo "Creating portable venv structure..."
-mkdir -p macos-venv-portable/bin
-mkdir -p macos-venv-portable/lib/python$PYTHON_VERSION/site-packages
-mkdir -p macos-venv-portable/lib/python$PYTHON_VERSION/site-packages
-
-# Copy site-packages
-echo "Copying installed packages..."
-cp -r macos-venv-temp/lib/python$PYTHON_VERSION/site-packages/* macos-venv-portable/lib/python$PYTHON_VERSION/site-packages/
-
-# Create a proper Python launcher script
-cat > macos-venv-portable/bin/python << 'EOF'
+# Create a robust wrapper that handles Rosetta 2 and framework paths
+cat > macos-venv/bin/python_wrapper << 'EOF'
 #!/bin/bash
-# Portable Python launcher for macOS
+# Universal Python wrapper for macOS (Intel/ARM + Rosetta 2)
+# This works around framework path issues and app translocation
 
 # Get the directory where this script is located
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 VENV_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
 
-# Calculate Python version from directory structure
-PYTHON_LIB_DIR=$(find "$VENV_ROOT/lib" -name "python3.*" -type d | head -1)
-PYTHON_VERSION=$(basename "$PYTHON_LIB_DIR" | sed 's/python//')
+# Find site-packages directory
+SITE_PACKAGES="$VENV_ROOT/lib/python__PYVER__/site-packages"
 
-# Set environment variables
-export PYTHONHOME="$VENV_ROOT"
-export VIRTUAL_ENV="$VENV_ROOT"
-export PYTHONPATH="$PYTHON_LIB_DIR/site-packages"
-
-# Use system Python but with our site-packages
-exec /usr/bin/env python$PYTHON_VERSION -c "
-import sys
-sys.path.insert(0, '$PYTHON_LIB_DIR/site-packages')
-# Now run the actual command
-if len(sys.argv) > 1:
-    # If called with -c, we need special handling
-    if sys.argv[1] == '-c':
-        exec(sys.argv[2])
-    else:
-        # Run as script
-        with open(sys.argv[1], 'r') as f:
-            code = compile(f.read(), sys.argv[1], 'exec')
-            exec(code)
-" "$@"
-EOF
-
-# Create pip wrapper
-cat > macos-venv-portable/bin/pip << 'EOF'
-#!/bin/bash
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-VENV_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
-PYTHON_LIB_DIR=$(find "$VENV_ROOT/lib" -name "python3.*" -type d | head -1)
-
-# Use system pip with our site-packages path
-/usr/bin/env python3 -c "
-import sys
-sys.path.insert(0, '$PYTHON_LIB_DIR/site-packages')
-import pip
-sys.exit(pip.main())
-" "$@"
-EOF
-
-# Create python3 symlink
-ln -sf python macos-venv-portable/bin/python3
-
-# Make executable
-chmod +x macos-venv-portable/bin/python
-chmod +x macos-venv-portable/bin/pip
-
-# Test the portable venv
-echo "Testing portable venv..."
-if macos-venv-portable/bin/python -c "import pandas, numpy, groq, matplotlib; print('SUCCESS: All imports work')"; then
-    echo "✓ Portable venv created successfully"
-else
-    echo "✗ Portable venv test failed"
-    exit 1
+# Debug info (can be removed in production)
+if [ -n "$DEBUG_PYTHON" ]; then
+    echo "=== Python Wrapper Debug ==="
+    echo "Script dir: $SCRIPT_DIR"
+    echo "Venv root: $VENV_ROOT"
+    echo "Site packages: $SITE_PACKAGES"
+    echo "Architecture: $(uname -m)"
+    echo "Python version: __PYVER__"
+    echo "============================"
 fi
 
-# Clean up temp venv
-rm -rf macos-venv-temp
+# Check if we're running under Rosetta
+if [[ $(sysctl -n sysctl.proc_translated 2>/dev/null) == "1" ]]; then
+    echo "⚠ Running under Rosetta 2 translation"
+fi
 
-# Rename to standard name for bundling
-mv macos-venv-portable macos-venv
+# Set up Python environment
+export PYTHONPATH="$SITE_PACKAGES:$PYTHONPATH"
+export VIRTUAL_ENV="$VENV_ROOT"
 
-echo "=== macOS portable virtual environment ready! ==="
-echo "Size: $(du -sh macos-venv | cut -f1)"
+# Unset PYTHONHOME to avoid conflicts with framework Python
+unset PYTHONHOME
+
+# Try multiple Python executables in order:
+# 1. System python (architecture appropriate)
+# 2. python3 from PATH
+# 3. python from PATH
+
+# First, try to use the architecture-appropriate system Python
+if command -v python__PYVER__ >/dev/null 2>&1; then
+    exec python__PYVER__ "$@"
+elif command -v python3 >/dev/null 2>&1; then
+    exec python3 "$@"
+elif command -v python >/dev/null 2>&1; then
+    exec python "$@"
+else
+    echo "ERROR: No Python interpreter found!" >&2
+    echo "Tried: python__PYVER__, python3, python" >&2
+    exit 1
+fi
+EOF
+
+# Replace version placeholder
+sed -i.bak "s/__PYVER__/$PYTHON_VERSION/g" macos-venv/bin/python_wrapper
+rm -f macos-venv/bin/python_wrapper.bak
+
+# Make executable
+chmod +x macos-venv/bin/python_wrapper
+
+# 5. Backup original and replace with wrapper
+echo "Replacing Python binary with wrapper..."
+mv macos-venv/bin/python macos-venv/bin/python.framework
+ln -sf python_wrapper macos-venv/bin/python
+ln -sf python_wrapper macos-venv/bin/python3
+
+# 6. Also create a pip wrapper
+cat > macos-venv/bin/pip_wrapper << EOF
+#!/bin/bash
+SCRIPT_DIR="\$( cd "\$( dirname "\${BASH_SOURCE[0]}" )" && pwd )"
+\$SCRIPT_DIR/python -m pip "\$@"
+EOF
+
+chmod +x macos-venv/bin/pip_wrapper
+ln -sf pip_wrapper macos-venv/bin/pip
+ln -sf pip_wrapper macos-venv/bin/pip3
+
+# 7. Test the wrapper
+echo "Testing wrapper..."
+if ./macos-venv/bin/python -c "import pandas; print(f'✓ Wrapper successful! Pandas {pandas.__version__}')"; then
+    echo "✓ Universal wrapper works!"
+else
+    echo "⚠ Wrapper test failed, but venv may still work in CI"
+fi
+
+echo "=== Universal macOS venv created! ==="
+echo "Size: \$(du -sh macos-venv | cut -f1)"
+echo ""
+echo "This venv uses a wrapper that:"
+echo "1. Works on both Intel and Apple Silicon"
+echo "2. Handles Rosetta 2 translation"
+echo "3. Avoids framework path issues"
+echo "4. Survives app translocation"

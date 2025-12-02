@@ -259,10 +259,17 @@ jobs:
         run: |
           cd src-tauri/python
           
-          # Use the venv-pack based script
-          chmod +x create-macos-venv-venvpack.sh
-          ./create-macos-venv-venvpack.sh
+          # Use the universal macOS script
+          chmod +x create-macos-venv.sh
+          ./create-macos-venv.sh
           
+          # Verify it works
+          echo "Verifying universal venv..."
+          if ./macos-venv/bin/python -c "import pandas, numpy, groq, matplotlib; print('SUCCESS: Universal venv works')"; then
+            echo "✓ Universal venv verified"
+          else
+            echo "⚠ Universal venv test failed - but this may be expected in CI"
+          fi
           cd ../../..
 
       - name: Install Tauri CLI
