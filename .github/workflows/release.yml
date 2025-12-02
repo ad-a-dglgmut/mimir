@@ -11,6 +11,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
+      - name: Extract version from tag
+        id: extract_version
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Building version: ${VERSION}"
+      
+      - name: Update tauri.conf.json with version
+        run: |
+          echo "Setting version to: ${{ steps.extract_version.outputs.version }}"
+          
+          # Update tauri.conf.json using jq
+          cd src-tauri
+          jq --arg version "${{ steps.extract_version.outputs.version }}" '.version = $version' tauri.conf.json > tmp.json
+          mv tmp.json tauri.conf.json
+          
+          echo "Updated tauri.conf.json:"
+          grep -n "version" tauri.conf.json
+          
+          # Verify the update
+          if grep -q "\"version\": \"${{ steps.extract_version.outputs.version }}\"" tauri.conf.json; then
+            echo "Successfully updated version to ${{ steps.extract_version.outputs.version }}"
+          else
+            echo "Failed to update version"
+            exit 1
+          fi
+          cd ..
+      
       - name: Install Linux dependencies
         run: |
           sudo apt update
@@ -20,7 +48,8 @@ jobs:
             libgtk-3-dev \
             libwebkit2gtk-4.1-dev \
             libglib2.0-dev \
-            patchelf
+            patchelf \
+            jq
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -55,6 +84,23 @@ jobs:
         run: npm run tauri build
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          APP_VERSION: ${{ steps.extract_version.outputs.version }}
+
+      - name: Verify Linux build version
+        run: |
+          echo "Verifying built version..."
+          # Check RPM package version if it exists
+          if ls src-tauri/target/release/bundle/rpm/*.rpm 2>/dev/null; then
+            rpm -qip src-tauri/target/release/bundle/rpm/*.rpm | grep -i version
+          fi
+          # Check AppImage version if it exists
+          if ls src-tauri/target/release/bundle/appimage/*.AppImage 2>/dev/null; then
+            echo "AppImage built for version: ${{ steps.extract_version.outputs.version }}"
+          fi
+          # Check Debian package version if it exists
+          if ls src-tauri/target/release/bundle/deb/*.deb 2>/dev/null; then
+            dpkg-deb -f src-tauri/target/release/bundle/deb/*.deb Version
+          fi
 
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
@@ -66,6 +112,36 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      
+      - name: Extract version from tag
+        id: extract_version
+        run: |
+          $version = "$env:GITHUB_REF" -replace 'refs/tags/v', ''
+          echo "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          echo "Building version: $version"
+      
+      - name: Update tauri.conf.json with version
+        run: |
+          echo "Setting version to: ${{ steps.extract_version.outputs.version }}"
+          
+          # Update tauri.conf.json using PowerShell
+          cd src-tauri
+          $version = "${{ steps.extract_version.outputs.version }}"
+          $content = Get-Content tauri.conf.json -Raw | ConvertFrom-Json
+          $content.version = $version
+          $content | ConvertTo-Json -Depth 10 | Set-Content tauri.conf.json
+          
+          echo "Updated tauri.conf.json:"
+          Select-String -Path tauri.conf.json -Pattern "version"
+          
+          # Verify the update
+          if ((Get-Content tauri.conf.json -Raw | ConvertFrom-Json).version -eq $version) {
+            echo "Successfully updated version to $version"
+          } else {
+            echo "Failed to update version"
+            exit 1
+          }
+          cd ..
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -104,6 +180,20 @@ jobs:
         run: npm run tauri build -- --target x86_64-pc-windows-msvc
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          APP_VERSION: ${{ steps.extract_version.outputs.version }}
+
+      - name: Verify Windows build version
+        run: |
+          echo "Verifying built version..."
+          # Check MSI version if it exists
+          if (Test-Path "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi") {
+            # Try to extract version info from MSI
+            $msiFiles = Get-ChildItem "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi"
+            foreach ($msi in $msiFiles) {
+              echo "MSI built: $($msi.Name)"
+              echo "Expected version: ${{ steps.extract_version.outputs.version }}"
+            }
+          }
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
@@ -115,6 +205,34 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      
+      - name: Extract version from tag
+        id: extract_version
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Building version: ${VERSION}"
+      
+      - name: Update tauri.conf.json with version
+        run: |
+          echo "Setting version to: ${{ steps.extract_version.outputs.version }}"
+          
+          # Update tauri.conf.json using jq
+          cd src-tauri
+          jq --arg version "${{ steps.extract_version.outputs.version }}" '.version = $version' tauri.conf.json > tmp.json
+          mv tmp.json tauri.conf.json
+          
+          echo "Updated tauri.conf.json:"
+          grep -n "version" tauri.conf.json
+          
+          # Verify the update
+          if grep -q "\"version\": \"${{ steps.extract_version.outputs.version }}\"" tauri.conf.json; then
+            echo "Successfully updated version to ${{ steps.extract_version.outputs.version }}"
+          else
+            echo "Failed to update version"
+            exit 1
+          fi
+          cd ..
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -157,6 +275,24 @@ jobs:
         run: npm run tauri build -- --target x86_64-apple-darwin --bundles app
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          APP_VERSION: ${{ steps.extract_version.outputs.version }}
+
+      - name: Verify macOS build version
+        run: |
+          echo "Verifying built version..."
+          # Check DMG version if it exists
+          if ls src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg 2>/dev/null; then
+            echo "DMG built for version: ${{ steps.extract_version.outputs.version }}"
+          fi
+          # Check app bundle version
+          if ls src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.app 2>/dev/null; then
+            app_path=$(ls src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.app | head -1)
+            echo "App bundle built at: $app_path"
+            # Try to read Info.plist for version
+            if [ -f "$app_path/Contents/Info.plist" ]; then
+              plutil -p "$app_path/Contents/Info.plist" | grep -i version
+            fi
+          fi
 
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
@@ -169,6 +305,13 @@ jobs:
     needs: [build-linux, build-windows, build-macos]
     steps:
       - uses: actions/checkout@v4
+      
+      - name: Extract version from tag
+        id: extract_version
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Uploading version: ${VERSION}"
 
       - name: Download Linux artifacts
         uses: actions/download-artifact@v4
@@ -196,7 +339,19 @@ jobs:
       - name: Install dependencies
         run: |
           npm install
-          npm install @aws-sdk/client-s3
+          npm install @aws-sdk/client-s3 jq
+
+      - name: Verify downloaded artifacts
+        run: |
+          echo "Verifying downloaded artifacts..."
+          echo "Linux artifacts:"
+          find dist/linux -type f -name "*" 2>/dev/null | head -20
+          echo ""
+          echo "Windows artifacts:"
+          find dist/windows -type f -name "*" 2>/dev/null | head -20
+          echo ""
+          echo "macOS artifacts:"
+          find dist/macos -type f -name "*" 2>/dev/null | head -20
 
       - name: Upload updates to S3
         run: node scripts/upload-update.js
@@ -204,3 +359,41 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           GITHUB_REF: ${{ github.ref }}
+          APP_VERSION: ${{ steps.extract_version.outputs.version }}
+
+      - name: Verify S3 upload
+        run: |
+          echo "Verifying latest.json was created correctly..."
+          if [ -f "latest.json" ]; then
+            echo "Latest.json content:"
+            cat latest.json | jq .
+            
+            # Check version matches
+            JSON_VERSION=$(cat latest.json | jq -r '.version')
+            EXPECTED_VERSION="${{ steps.extract_version.outputs.version }}"
+            
+            if [ "$JSON_VERSION" = "$EXPECTED_VERSION" ]; then
+              echo "Version in latest.json matches tag: $JSON_VERSION"
+            else
+              echo "Version mismatch! Expected: $EXPECTED_VERSION, Got: $JSON_VERSION"
+              exit 1
+            fi
+            
+            # Check all platforms are present
+            PLATFORMS=$(cat latest.json | jq -r '.platforms | keys[]')
+            echo "Platforms in latest.json:"
+            echo "$PLATFORMS"
+            
+            REQUIRED_PLATFORMS="linux-x86_64 darwin-x86_64 windows-x86_64"
+            for platform in $REQUIRED_PLATFORMS; do
+              if echo "$PLATFORMS" | grep -q "$platform"; then
+                echo "Found $platform"
+              else
+                echo "Missing $platform"
+                exit 1
+              fi
+            done
+          else
+            echo "latest.json not found!"
+            exit 1
+          fi

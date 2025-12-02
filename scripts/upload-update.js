@@ -1,7 +1,6 @@
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import fs from "fs";
 import path from "path";
-import { execSync } from "child_process";
 
 const s3 = new S3Client({
   region: "eu-north-1",
@@ -11,7 +10,16 @@ const s3 = new S3Client({
   },
 });
 
-const version = process.env.GITHUB_REF.replace("refs/tags/", "");
+// Extract version properly from tag
+function extractVersionFromTag(tagRef) {
+  const tagName = tagRef.replace("refs/tags/", "");
+  // Remove 'v' prefix if present, keep only version number
+  const version = tagName.startsWith('v') ? tagName.substring(1) : tagName;
+  console.log(`Tag: ${tagName} → Version: ${version}`);
+  return version;
+}
+
+const version = extractVersionFromTag(process.env.GITHUB_REF);
 const bucket = "mimir-updates";
 
 // Platform-specific build directories
@@ -134,8 +142,10 @@ function determinePlatformFromFile(filePath, fileName) {
 }
 
 async function main() {
+  console.log(`\n=== Starting S3 Upload for Version: ${version} ===\n`);
+
   const latestJson = {
-    version,
+    version, // This should be "0.1.7" not "v0.1.7"
     notes: "Automatic update",
     pub_date: new Date().toISOString(),
     platforms: {}
@@ -144,7 +154,7 @@ async function main() {
   // Process each platform
   for (const [platformName, platformDir] of Object.entries(platformDirs)) {
     if (!fs.existsSync(platformDir)) {
-      console.log(`No build files found for ${platformName}`);
+      console.log(`No build files found for ${platformName} at ${platformDir}`);
       continue;
     }
 
@@ -154,31 +164,37 @@ async function main() {
     console.log(`Found ${updateFiles.length} update files for ${platformName}`);
 
     for (const fileInfo of updateFiles) {
-      console.log(`Processing: ${fileInfo.fileName}`);
+      console.log(`\nProcessing: ${fileInfo.fileName}`);
       console.log(`  File: ${fileInfo.filePath}`);
       console.log(`  Signature: ${fileInfo.signaturePath}`);
       
       // Upload the main file
       const fileKey = `releases/${version}/${platformName}/${path.basename(fileInfo.filePath)}`;
       await uploadFileToS3(fileInfo.filePath, fileKey);
-      console.log(`  Uploaded to: ${fileKey}`);
+      console.log(`Uploaded to: ${fileKey}`);
       
       // Upload the signature file if it exists
       if (fs.existsSync(fileInfo.signaturePath)) {
         const sigKey = `releases/${version}/${platformName}/${path.basename(fileInfo.signaturePath)}`;
         await uploadFileToS3(fileInfo.signaturePath, sigKey);
-        console.log(`  Signature uploaded to: ${sigKey}`);
+        console.log(`Signature uploaded to: ${sigKey}`);
       }
       
       // Add to latest.json
       const platform = determinePlatformFromFile(fileInfo.filePath, fileInfo.fileName);
       if (platform) {
         const signature = readSignature(fileInfo.signaturePath);
-        latestJson.platforms[platform] = {
-          signature: signature,
-          url: `https://${bucket}.s3.eu-north-1.amazonaws.com/${fileKey}`
-        };
-        console.log(`  Added to latest.json for platform: ${platform}`);
+        if (signature) {
+          latestJson.platforms[platform] = {
+            signature: signature,
+            url: `https://${bucket}.s3.eu-north-1.amazonaws.com/${fileKey}`
+          };
+          console.log(`Added to latest.json for platform: ${platform}`);
+        } else {
+          console.warn(`No signature found for ${platform}, skipping in latest.json`);
+        }
+      } else {
+        console.warn(`Could not determine platform for ${fileInfo.fileName}`);
       }
     }
 
@@ -187,20 +203,35 @@ async function main() {
     const venvPath = path.join(platformDir, 'python');
     if (fs.existsSync(venvPath)) {
       await uploadDirectoryToS3(venvPath, `releases/${version}/${platformName}/python`);
+      console.log(`Python virtual environment uploaded`);
     } else {
-      console.log(`  No Python virtual environment found at ${venvPath}`);
+      console.log(`No Python virtual environment found at ${venvPath}`);
     }
   }
 
   // Validate that we have all required platforms
+  console.log('\nValidating platform coverage...');
   const requiredPlatforms = ['linux-x86_64', 'darwin-x86_64', 'windows-x86_64'];
+  let hasAllPlatforms = true;
+  
   for (const platform of requiredPlatforms) {
     if (!latestJson.platforms[platform]) {
       console.warn(`Missing platform ${platform} in latest.json`);
+      hasAllPlatforms = false;
+    } else {
+      console.log(`Found platform ${platform}`);
     }
   }
 
+  if (!hasAllPlatforms) {
+    console.warn('\nWarning: Not all platforms have update files!');
+    console.log('Available platforms:', Object.keys(latestJson.platforms));
+  }
+
   // Save and upload latest.json
+  console.log('\nGenerating latest.json...');
+  console.log('Content:', JSON.stringify(latestJson, null, 2));
+  
   fs.writeFileSync("latest.json", JSON.stringify(latestJson, null, 2));
   
   const latestJsonCommand = new PutObjectCommand({
@@ -209,13 +240,22 @@ async function main() {
     Body: JSON.stringify(latestJson, null, 2),
     ContentType: "application/json",
   });
+  
   await s3.send(latestJsonCommand);
+  console.log('latest.json uploaded to S3');
 
-  console.log("\nMulti-platform update artifacts uploaded!");
-  console.log("latest.json content:", JSON.stringify(latestJson, null, 2));
+  // Also save a local copy with the version in the filename for debugging
+  const localCopyPath = `latest-${version}.json`;
+  fs.writeFileSync(localCopyPath, JSON.stringify(latestJson, null, 2));
+  console.log(`Local copy saved as: ${localCopyPath}`);
+
+  console.log("\nMulti-platform update artifacts uploaded successfully!");
+  console.log(`Version: ${version}`);
+  console.log(`Published: ${latestJson.pub_date}`);
+  console.log(`Update URL: https://${bucket}.s3.eu-north-1.amazonaws.com/updates/latest.json`);
 }
 
 main().catch((err) => {
-  console.error(err);
+  console.error('\nError:', err);
   process.exit(1);
 });
