@@ -228,3 +228,52 @@ pre, code {
   background-color: hsl(var(--muted)) !important;
   color: hsl(var(--muted-foreground)) !important;
 }
+/* Custom scrollbar styling */
+.custom-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: var(--sidebar-border) transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 8px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background-color: var(--sidebar-border);
+  border-radius: 4px;
+  border: 2px solid transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background-color: var(--primary);
+}
+
+/* Dark theme scrollbar */
+.dark .custom-scrollbar {
+  scrollbar-color: hsl(220 15% 25%) transparent;
+}
+
+.dark .custom-scrollbar::-webkit-scrollbar-thumb {
+  background-color: hsl(220 15% 25%);
+}
+
+.dark .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background-color: hsl(220 15% 35%);
+}
+
+/* Light theme scrollbar */
+.light .custom-scrollbar {
+  scrollbar-color: hsl(220 15% 85%) transparent;
+}
+
+.light .custom-scrollbar::-webkit-scrollbar-thumb {
+  background-color: hsl(220 15% 85%);
+}
+
+.light .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background-color: hsl(220 15% 75%);
+}

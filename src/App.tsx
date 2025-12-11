@@ -36,6 +36,8 @@ import "./App.css"
 import { Drawer, DrawerContent, DrawerHeader, DrawerFooter, DrawerTitle } from "./components/ui/drawer"
 import { check } from "@tauri-apps/plugin-updater"
 import type { Update } from "@tauri-apps/plugin-updater"
+import LightIcon from "./assets/logo_notext_light.png"
+import DarkIcon from "./assets/logo_notext.png"
 
 // ========== INTERFACES ==========
 
@@ -97,6 +99,14 @@ interface ExportModalState {
   fileContent?: string;
 }
 
+// ========== Tauri-specific file handling ==========
+
+declare global {
+  interface File {
+    path?: string;
+  }
+}
+
 // ========== MAIN COMPONENT ==========
 
 export default function MimirApp() {
@@ -134,6 +144,8 @@ export default function MimirApp() {
   const [uploadedFiles, setUploadedFiles] = useState<FileInfo[]>([])
   const [showMergeModal, setShowMergeModal] = useState<boolean>(false)
   const [matchingColumns, setMatchingColumns] = useState<string[]>([])
+  const [chatToDelete, setChatToDelete] = useState<string | null>(null)
+
   const [mergeConfig, setMergeConfig] = useState<MergeConfig>({
     primaryFile: '',
     filesToMerge: []
@@ -153,8 +165,8 @@ export default function MimirApp() {
   const [showUpdateNotification, setShowUpdateNotification] = useState<boolean>(false)
 
   // ========== LOGO CONFIG ==========
-  const logoPath = theme === "dark" ? "../src-tauri/icons/logo_notext.png" : "../src-tauri/icons/logo_notext_light.png"
-  const iconPath = theme === "dark" ? "../src-tauri/icons/logo_notext.png" : "../src-tauri/icons/logo_notext_light.png"
+  const logoPath = theme === "dark" ? DarkIcon : LightIcon 
+  const iconPath = theme === "dark" ? DarkIcon : LightIcon
 
   // ========== USE EFFECTS ==========
 
@@ -194,28 +206,34 @@ export default function MimirApp() {
 
   useEffect(() => {
     const mainWindow = new Window("main")
-    let cleanup: (() => void) | undefined
-
-    mainWindow
-      .onDragDropEvent(async (event) => {
+    
+    const setupDragDrop = async () => {
+      const unlisten = await mainWindow.onDragDropEvent((event) => {
         const payload = event.payload as FileDropPayload
+        console.log('Drag drop event:', payload.type, payload.paths)
+        
         if (payload.type === "drop" && payload.paths.length > 0) {
           const filePaths = payload.paths
+          console.log('Files dropped:', filePaths)
+          
           if (filePaths.length === 1) {
-            try {
-              await setCsvPathForChat(filePaths[0])
-            } catch (err) {
-              console.error("Failed to load CSV:", err)
-            }
-          } else {
-            await handleMultipleFilesDropFromPaths(filePaths)
+            handleFileDropFromPath(filePaths[0])
+          } else if (filePaths.length > 1) {
+            handleMultipleFilesDropFromPaths(filePaths)
           }
         }
       })
-      .then((unlisten) => {
-        cleanup = unlisten
-      })
-
+      return unlisten
+    }
+    
+    let cleanup: (() => void) | undefined
+    
+    setupDragDrop().then((unlisten) => {
+      cleanup = unlisten
+    }).catch(err => {
+      console.error("Failed to setup drag drop:", err)
+    })
+    
     return () => {
       if (cleanup) cleanup()
     }
@@ -542,29 +560,105 @@ export default function MimirApp() {
     const files = event.target.files
     if (!files || files.length === 0) return
 
-    if (files.length === 1) {
-      const file = files[0]
-      if (file.name.toLowerCase().endsWith(".csv") || file.name.toLowerCase().match(/\.xlsx?$/)) {
-        try {
-          await setCsvPathForChat((file as any).path)
-        } catch (err) {
-          console.error("Failed to load CSV:", err)
-          alert("Failed to load CSV file. Please try again.")
-        }
-      } else {
-        alert("Please select a CSV or Excel file.")
-      }
-    } else {
-      await handleMultipleFilesDrop(files)
-    }
+    console.log('Files selected via browser:', files.length, Array.from(files).map(f => f.name))
 
-    if (fileInputRef.current) {
-      fileInputRef.current.value = ""
+    try {
+      const newFiles: FileInfo[] = []
+      let firstFilePath = ""
+      
+      // Process each file
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i]
+        
+        // Check if it's a supported file type
+        if (file.name.toLowerCase().endsWith(".csv") || file.name.toLowerCase().match(/\.xlsx?$/)) {
+          console.log(`Processing file ${i + 1}/${files.length}: ${file.name}`)
+          
+          try {
+            // Use Tauri's upload_file command
+            const filePath = await invoke<string>("upload_file", {
+              fileName: file.name,
+              fileData: await file.arrayBuffer()
+            })
+            
+            if (filePath) {
+              console.log(`File saved to: ${filePath}`)
+              
+              // Load file info
+              const fileInfo = await loadFileInfoFromPath(filePath)
+              newFiles.push(fileInfo)
+              
+              // Save the first file path to set as CSV path
+              if (i === 0) {
+                firstFilePath = filePath
+              }
+            }
+          } catch (err) {
+            console.error(`Failed to process file ${file.name}:`, err)
+            alert(`Failed to process file "${file.name}". Please try again.`)
+          }
+        } else {
+          alert(`File "${file.name}" is not a supported file type. Please select CSV or Excel files.`)
+        }
+      }
+      
+      // Update uploaded files state with all new files
+      if (newFiles.length > 0) {
+        setUploadedFiles(prev => {
+          const existingPaths = new Set(prev.map(f => f.path))
+          const uniqueNewFiles = newFiles.filter(file => !existingPaths.has(file.path))
+          
+          const updatedFiles = [...prev, ...uniqueNewFiles]
+          
+          if (updatedFiles.length >= 2) {
+            findMatchingColumns(updatedFiles)
+          }
+          
+          return updatedFiles
+        })
+        
+        // Set the first file as the CSV path
+        if (firstFilePath) {
+          await setCsvPathForChat(firstFilePath)
+        }
+      }
+      
+    } catch (err) {
+      console.error("Failed to load files:", err)
+      alert("Failed to load files. Please try again.")
+    } finally {
+      if (fileInputRef.current) {
+        fileInputRef.current.value = ""
+      }
     }
   }
 
   const handleUploadAreaClick = () => {
-    fileInputRef.current?.click()
+    console.log('Upload area clicked')
+    if (fileInputRef.current) {
+      fileInputRef.current.click()
+    }
+  }
+
+  const handleFileDropFromPath = async (filePath: string) => {
+    try {
+      await setCsvPathForChat(filePath)
+      const fileInfo = await loadFileInfoFromPath(filePath)
+      setUploadedFiles(prev => {
+        const existingPaths = new Set(prev.map(f => f.path))
+        if (!existingPaths.has(fileInfo.path)) {
+          const updated = [...prev, fileInfo]
+          if (updated.length >= 2) {
+            findMatchingColumns(updated)
+          }
+          return updated
+        }
+        return prev
+      })
+    } catch (err) {
+      console.error("Failed to load CSV:", err)
+      alert("Failed to load CSV file. Please try again.")
+    }
   }
 
   // ========== CHAT MANAGEMENT ==========
@@ -656,27 +750,6 @@ export default function MimirApp() {
     }
   }
 
-  const handleDeleteChat = async (chatName: string) => {
-    if (!confirm(`Are you sure you want to delete chat "${chatName}"?`)) return
-
-    try {
-      await invoke("delete_chat", { chatName })
-      await loadChatList()
-      if (currentChat === chatName) {
-        const remainingChats = chats.filter((chat) => chat.name !== chatName)
-        if (remainingChats.length > 0) {
-          await handleSwitchChat(remainingChats[0].name)
-        } else {
-          await invoke("create_chat", { chatName: "default" })
-          await loadChatList()
-          await loadCurrentChatName()
-        }
-      }
-    } catch (err) {
-      alert(`Failed to delete chat: ${err}`)
-    }
-  }
-
   const setCsvPathForChat = async (path: string) => {
     try {
       await invoke("set_csv_path", { csvPath: path })
@@ -765,52 +838,12 @@ export default function MimirApp() {
     e.preventDefault()
     setIsDragging(false)
 
-    const files = Array.from(e.dataTransfer.files)
+    // For Tauri, we handle OS drag-and-drop through the Tauri event listener
+    // The HTML5 drag-and-drop won't give us file paths
+    console.log('HTML5 drag drop event - using Tauri handler instead')
     
-    if (files.length === 1) {
-      const csvFile: any = files.find((file) => 
-        file.name.toLowerCase().endsWith(".csv") ||
-        file.name.toLowerCase().match(/\.xlsx?$/)
-      )
-
-      if (csvFile) {
-        try {
-          await setCsvPathForChat(csvFile.path)
-        } catch (err) {
-          console.error("Failed to load CSV:", err)
-          alert("Failed to load CSV file. Please try again.")
-        }
-      } else {
-        alert("Please drop a CSV or Excel file.")
-      }
-    } else {
-      await handleMultipleFilesDrop(e.dataTransfer.files)
-    }
-  }
-
-  const handleMultipleFilesDrop = async (files: FileList) => {
-    const csvFiles = Array.from(files).filter(file => 
-      file.name.toLowerCase().endsWith('.csv') || 
-      file.name.toLowerCase().match(/\.xlsx?$/)
-    )
-
-    if (csvFiles.length === 0) {
-      alert('Please drop CSV or Excel files.')
-      return
-    }
-
-    try {
-      const newFiles: FileInfo[] = []
-      for (const file of csvFiles) {
-        const fileInfo = await loadFileInfo(file)
-        newFiles.push(fileInfo)
-      }
-      
-      updateUploadedFilesWithNewFiles(newFiles)
-    } catch (err) {
-      console.error('Failed to load files:', err)
-      alert('Failed to load some files. Please try again.')
-    }
+    // In Tauri, OS drag-and-drop is handled by the Window event listener above
+    // So we don't need to handle it here
   }
 
   const handleMultipleFilesDropFromPaths = async (filePaths: string[]) => {
@@ -841,26 +874,6 @@ export default function MimirApp() {
       
       return updatedFiles
     })
-  }
-
-  const loadFileInfo = async (file: any): Promise<FileInfo> => {
-    try {
-      const preview = await invoke<Array<Array<string>>>("load_csv_info", {
-        csvPath: file.path
-      })
-      
-      const columns = preview.length > 0 ? preview[0] : []
-      
-      return {
-        name: file.name,
-        path: file.path,
-        columns,
-        preview: preview.slice(0, 5)
-      }
-    } catch (err) {
-      console.error('Error loading file info:', err)
-      throw new Error(`Failed to load file ${file.name}`)
-    }
   }
 
   const loadFileInfoFromPath = async (filePath: string): Promise<FileInfo> => {
@@ -899,6 +912,7 @@ export default function MimirApp() {
     
     setMatchingColumns(matches)
     
+    // Initialize merge config if we have exactly 2 files and matches
     if (files.length === 2 && matches.length > 0) {
       setMergeConfig({
         primaryFile: files[0].path,
@@ -908,12 +922,22 @@ export default function MimirApp() {
           merge_type: 'inner'
         }]
       })
-      setShowMergeModal(true)
     }
   }
 
   const removeUploadedFile = (filePath: string) => {
     setUploadedFiles(prev => prev.filter(file => file.path !== filePath))
+    // Recalculate matching columns after removal
+    if (uploadedFiles.length > 1) {
+      const remainingFiles = uploadedFiles.filter(file => file.path !== filePath)
+      if (remainingFiles.length >= 2) {
+        findMatchingColumns(remainingFiles)
+      } else {
+        setMatchingColumns([])
+      }
+    } else {
+      setMatchingColumns([])
+    }
   }
 
   // ========== MERGE FUNCTIONS ==========
@@ -976,52 +1000,62 @@ export default function MimirApp() {
     )
   }
 
-  const handleMergeFiles = async () => {
-    if (!mergeConfig.primaryFile || mergeConfig.filesToMerge.length === 0) {
-      alert('Please select a primary file and at least one file to merge')
-      return
-    }
+const handleMergeFiles = async () => {
+  if (!mergeConfig.primaryFile || mergeConfig.filesToMerge.length === 0) {
+    alert('Please select a primary file and at least one file to merge')
+    return
+  }
 
-    const missingColumns = mergeConfig.filesToMerge.filter(file => !file.merge_column)
-    if (missingColumns.length > 0) {
-      alert('Please select merge columns for all files')
-      return
-    }
+  const missingColumns = mergeConfig.filesToMerge.filter(file => !file.merge_column)
+  if (missingColumns.length > 0) {
+    alert('Please select merge columns for all files')
+    return
+  }
 
-    try {
-      const mergedPath = await invoke<string>("merge_multiple_files", {
-        primaryPath: mergeConfig.primaryFile,
-        mergeConfigs: mergeConfig.filesToMerge.map(config => ({
-          file_path: config.file_path,
-          merge_column: config.merge_column,
-          merge_type: config.merge_type
-        }))
-      })
+  try {
+    console.log('Merging files:', mergeConfig)
+    
+    const mergedPath = await invoke<string>("merge_multiple_files", {
+      primaryPath: mergeConfig.primaryFile,
+      mergeConfigs: mergeConfig.filesToMerge.map(config => ({
+        file_path: config.file_path,
+        merge_column: config.merge_column,
+        merge_type: config.merge_type
+      }))
+      // Note: app_handle is automatically passed by Tauri
+    })
 
-      await setCsvPathForChat(mergedPath)
-      
-      const mergedFilePaths = [
-        mergeConfig.primaryFile,
-        ...mergeConfig.filesToMerge.map(f => f.file_path)
-      ]
-      
-      setUploadedFiles(prev => 
-        prev.filter(file => !mergedFilePaths.includes(file.path))
-      )
-      
-      setShowMergeModal(false)
-      setMatchingColumns([])
-      setMergeConfig({
-        primaryFile: '',
-        filesToMerge: []
-      })
-      
-      alert(`Files merged successfully! Using: ${mergedPath.split(/[\\/]/).pop()}`)
-    } catch (err) {
-      console.error('Merge failed:', err)
-      alert(`Merge failed: ${err}`)
+    console.log('Merge successful! Path:', mergedPath)
+    
+    await setCsvPathForChat(mergedPath)
+    
+    const mergedFilePaths = [
+      mergeConfig.primaryFile,
+      ...mergeConfig.filesToMerge.map(f => f.file_path)
+    ]
+    
+    setUploadedFiles(prev => 
+      prev.filter(file => !mergedFilePaths.includes(file.path))
+    )
+    
+    setShowMergeModal(false)
+    setMatchingColumns([])
+    setMergeConfig({
+      primaryFile: '',
+      filesToMerge: []
+    })
+    
+    alert(`Files merged successfully! Using: ${mergedPath.split(/[\\/]/).pop()}`)
+  } catch (err) {
+    console.error('Merge failed:', err)
+    alert(`Merge failed: ${err}`)
+    
+    // Show more detailed error
+    if (err instanceof Error) {
+      console.error('Error details:', err.message, err.stack)
     }
   }
+}
 
   // ========== COMPONENT RENDERERS ==========
 
@@ -1528,7 +1562,6 @@ export default function MimirApp() {
                 <img src={logoPath} alt="Mimir" />
               </div>
               <h1 className="text-3xl font-bold text-foreground mb-2">Mimir</h1>
-              <p className="text-muted-foreground">Data Analysis Platform</p>
             </div>
 
             <form onSubmit={handleLogin} className="space-y-4">
@@ -1633,6 +1666,62 @@ export default function MimirApp() {
 
   return (
     <div className={`min-h-screen bg-background flex overflow-hidden ${theme}`}>
+      {/* Delete Confirmation Modal */}
+      {chatToDelete && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-md flex items-center justify-center z-50 p-4">
+          <div className="bg-card border rounded-lg p-6 w-full max-w-md">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-full bg-destructive/10 flex items-center justify-center">
+                <Trash2 className="w-5 h-5 text-destructive" />
+              </div>
+              <div>
+                <h3 className="text-lg font-bold text-foreground">Delete Chat</h3>
+                <p className="text-sm text-muted-foreground">This action cannot be undone</p>
+              </div>
+            </div>
+            
+            <p className="text-foreground mb-6">
+              Are you sure you want to delete chat <span className="font-bold text-primary">"{chatToDelete}"</span>?
+              All messages and data in this chat will be permanently deleted.
+            </p>
+            
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={() => setChatToDelete(null)}
+                className="px-4 py-2 text-muted-foreground hover:bg-accent rounded transition-all"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={async () => {
+                  try {
+                    await invoke("delete_chat", { chatName: chatToDelete })
+                    await loadChatList()
+                    if (currentChat === chatToDelete) {
+                      const remainingChats = chats.filter((chat) => chat.name !== chatToDelete)
+                      if (remainingChats.length > 0) {
+                        await handleSwitchChat(remainingChats[0].name)
+                      } else {
+                        await invoke("create_chat", { chatName: "default" })
+                        await loadChatList()
+                        await loadCurrentChatName()
+                      }
+                    }
+                    setChatToDelete(null)
+                  } catch (err) {
+                    alert(`Failed to delete chat: ${err}`)
+                    setChatToDelete(null)
+                  }
+                }}
+                className="px-4 py-2 bg-destructive text-destructive-foreground rounded hover:bg-destructive/90 transition-all font-bold flex items-center gap-2"
+              >
+                <Trash2 className="w-4 h-4" />
+                Delete Chat
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       
       {/* Hidden file input */}
       <input
@@ -1642,6 +1731,10 @@ export default function MimirApp() {
         accept=".csv,.xls,.xlsx"
         multiple
         className="hidden"
+        onClick={(e) => {
+          // Reset the value to allow selecting the same file again
+          e.currentTarget.value = ''
+        }}
       />
       
       {/* Export Modal */}
@@ -1719,111 +1812,113 @@ export default function MimirApp() {
         </div>
       )}
 
-      {/* Chat Sidebar */}
-      <Drawer open={showChatSidebar} onOpenChange={setShowChatSidebar} direction="left">
-        <DrawerContent className="w-80 bg-sidebar backdrop-blur-sm border-r border-sidebar-border">
-          <DrawerHeader className="p-4 border-b border-sidebar-border">
-            <div className="flex items-center justify-between mb-4">
-              <div className="flex items-center gap-2">
-                <div className="w-10 h-10 rounded flex items-center justify-center">
-                  <img src={logoPath} alt="Mimir" />
-                </div>
-                <DrawerTitle className="text-lg font-bold text-sidebar-foreground">Mimir</DrawerTitle>
-              </div>
-              <button
-                onClick={() => setShowNewChatModal(true)}
-                className="p-2 text-primary hover:bg-primary/20 rounded transition-all"
-                title="New Chat"
-              >
-                <Plus className="w-5 h-5" />
-              </button>
-            </div>
+{/* Chat Sidebar */}
+<Drawer open={showChatSidebar} onOpenChange={setShowChatSidebar} direction="left">
+  <DrawerContent className="w-80 bg-sidebar backdrop-blur-sm border-r border-sidebar-border flex flex-col h-full">
+    <DrawerHeader className="p-4 border-b border-sidebar-border flex-shrink-0">
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-2">
+          <div className="w-10 h-10 rounded flex items-center justify-center">
+            <img src={logoPath} alt="Mimir" />
+          </div>
+          <DrawerTitle className="text-lg font-bold text-sidebar-foreground">Mimir</DrawerTitle>
+        </div>
+        <button
+          onClick={() => setShowNewChatModal(true)}
+          className="p-2 text-primary hover:bg-primary/20 rounded transition-all"
+          title="New Chat"
+        >
+          <Plus className="w-5 h-5" />
+        </button>
+      </div>
 
-            <div className="bg-primary/10 border border-primary/20 p-3 rounded-lg mb-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2 min-w-0 flex-1">
-                  <User className="w-4 h-4 text-primary flex-shrink-0" />
-                  <span className="text-sm font-medium text-sidebar-foreground truncate">{username}</span>
-                </div>
+      <div className="bg-primary/10 border border-primary/20 p-3 rounded-lg mb-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2 min-w-0 flex-1">
+            <User className="w-4 h-4 text-primary flex-shrink-0" />
+            <span className="text-sm font-medium text-sidebar-foreground truncate">{username}</span>
+          </div>
+          <button
+            onClick={handleLogout}
+            className="p-1.5 text-sidebar-foreground/60 hover:text-destructive transition-colors cursor-pointer flex-shrink-0"
+            title="Logout"
+          >
+            <LogOut className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+
+      <div className="bg-primary/10 border border-primary/20 p-3 rounded-lg">
+        <p className="text-xs font-medium text-sidebar-foreground/70">Current Session</p>
+        <p className="text-lg font-bold text-primary truncate">{currentChat}</p>
+        <p className="text-xs text-sidebar-foreground/70 mt-1">
+          {history.length} message{history.length !== 1 ? "s" : ""}
+        </p>
+        {csvPath && (
+          <p className="text-xs text-primary/90 mt-1 truncate flex items-center gap-1" title={csvPath}>
+            <Database className="w-3 h-3 flex-shrink-0" />
+            <span className="truncate block max-w-52 overflow-hidden text-ellipsis whitespace-nowrap">{fileName}</span>
+          </p>
+        )}
+      </div>
+    </DrawerHeader>
+
+    <div className="flex-1 overflow-y-auto min-h-0">
+      <div className="h-full overflow-y-auto pr-2 custom-scrollbar">
+        {chats.map((chat) => (
+          <div
+            key={chat.name}
+            className={`p-3 border-b border-sidebar-border cursor-pointer hover:bg-sidebar-accent transition-all ${
+              currentChat === chat.name ? "bg-primary/10 border-l-4 border-l-primary" : ""
+            }`}
+            onClick={() => handleSwitchChat(chat.name)}
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 flex-1 min-w-0">
+                <MessageSquare className="w-4 h-4 text-sidebar-foreground/60 flex-shrink-0" />
+                <span className="font-medium text-sidebar-foreground truncate block overflow-hidden text-ellipsis whitespace-nowrap">{chat.name}</span>
+              </div>
+              <div className="flex items-center gap-1 flex-shrink-0">
+                <span className="text-xs text-sidebar-foreground/60 bg-sidebar-accent px-2 py-1 rounded shadow-sm">
+                  {chat.message_count}
+                </span>
                 <button
-                  onClick={handleLogout}
-                  className="p-1.5 text-sidebar-foreground/60 hover:text-destructive transition-colors cursor-pointer flex-shrink-0"
-                  title="Logout"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    setChatToDelete(chat.name)
+                  }}
+                  className="p-1 text-sidebar-foreground/60 hover:text-destructive transition-colors"
+                  title="Delete Chat"
                 >
-                  <LogOut className="w-4 h-4" />
+                  <Trash2 className="w-3 h-3" />
                 </button>
               </div>
             </div>
-
-            <div className="bg-primary/10 border border-primary/20 p-3 rounded-lg">
-              <p className="text-xs font-medium text-sidebar-foreground/70">Current Session</p>
-              <p className="text-lg font-bold text-primary truncate">{currentChat}</p>
-              <p className="text-xs text-sidebar-foreground/70 mt-1">
-                {history.length} message{history.length !== 1 ? "s" : ""}
+            <p className="text-xs text-sidebar-foreground/60 mt-1">
+              {new Date(chat.created_at).toLocaleDateString()}
+            </p>
+            {chat.csv_path && (
+              <p className="text-xs text-primary/80 mt-1 truncate flex items-center gap-1" title={chat.csv_path}>
+                <Database className="w-3 h-3 flex-shrink-0" />
+                <span className="truncate block overflow-hidden text-ellipsis whitespace-nowrap">{chat.csv_path.split(/[\\/]/).pop()}</span>
               </p>
-              {csvPath && (
-                <p className="text-xs text-primary/90 mt-1 truncate flex items-center gap-1" title={csvPath}>
-                  <Database className="w-3 h-3 flex-shrink-0" />
-                  <span className="truncate block max-w-52 overflow-hidden text-ellipsis whitespace-nowrap">{fileName}</span>
-                </p>
-              )}
-            </div>
-          </DrawerHeader>
-
-          <div className="flex-1 overflow-y-auto">
-            {chats.map((chat) => (
-              <div
-                key={chat.name}
-                className={`p-3 border-b border-sidebar-border cursor-pointer hover:bg-sidebar-accent transition-all ${
-                  currentChat === chat.name ? "bg-primary/10 border-l-4 border-l-primary" : ""
-                }`}
-                onClick={() => handleSwitchChat(chat.name)}
-              >
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2 flex-1 min-w-0">
-                    <MessageSquare className="w-4 h-4 text-sidebar-foreground/60 flex-shrink-0" />
-                    <span className="font-medium text-sidebar-foreground truncate block overflow-hidden text-ellipsis whitespace-nowrap">{chat.name}</span>
-                  </div>
-                  <div className="flex items-center gap-1 flex-shrink-0">
-                    <span className="text-xs text-sidebar-foreground/60 bg-sidebar-accent px-2 py-1 rounded shadow-sm">
-                      {chat.message_count}
-                    </span>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        handleDeleteChat(chat.name)
-                      }}
-                      className="p-1 text-sidebar-foreground/60 hover:text-destructive transition-colors"
-                      title="Delete Chat"
-                    >
-                      <Trash2 className="w-3 h-3" />
-                    </button>
-                  </div>
-                </div>
-                <p className="text-xs text-sidebar-foreground/60 mt-1">
-                  {new Date(chat.created_at).toLocaleDateString()}
-                </p>
-                {chat.csv_path && (
-                  <p className="text-xs text-primary/80 mt-1 truncate flex items-center gap-1" title={chat.csv_path}>
-                    <Database className="w-3 h-3 flex-shrink-0" />
-                    <span className="truncate block overflow-hidden text-ellipsis whitespace-nowrap">{chat.csv_path.split(/[\\/]/).pop()}</span>
-                  </p>
-                )}
-              </div>
-            ))}
+            )}
           </div>
+        ))}
+      </div>
+    </div>
 
-          <DrawerFooter className="p-4 border-t border-sidebar-border">
-            <button
-              onClick={() => setShowChatSidebar(false)}
-              className="w-full p-2 text-sidebar-foreground/70 hover:bg-sidebar-accent rounded transition-all flex items-center justify-center gap-2"
-            >
-              <X className="w-4 h-4" />
-              Hide Sidebar
-            </button>
-          </DrawerFooter>
-        </DrawerContent>
-      </Drawer>
+    <DrawerFooter className="p-4 border-t border-sidebar-border flex-shrink-0">
+      <button
+        onClick={() => setShowChatSidebar(false)}
+        className="w-full p-2 text-sidebar-foreground/70 hover:bg-sidebar-accent rounded transition-all flex items-center justify-center gap-2"
+      >
+        <X className="w-4 h-4" />
+        Hide Sidebar
+      </button>
+    </DrawerFooter>
+  </DrawerContent>
+</Drawer>
 
       {showChatSidebar && (
         <div
@@ -1852,7 +1947,6 @@ export default function MimirApp() {
               </div>
               <div className="min-w-0">
                 <h1 className="text-xl font-bold text-foreground">Mimir</h1>
-                <p className="text-xs text-muted-foreground hidden sm:block">Data Analysis Platform</p>
               </div>
             </div>
             <div className="flex items-center gap-3">
@@ -1899,10 +1993,10 @@ export default function MimirApp() {
                   className={`w-12 h-12 text-primary mb-4 ${isDragging ? "scale-110" : ""}`}
                 />
                 <p className="text-foreground font-semibold text-lg mb-2">
-                  Drop your CSV or Excel file here, or click to browse
+                  Select file or multiple files to analyze 
                 </p>
                 <p className="text-muted-foreground/70 text-sm mt-2">
-                  Supports .csv, .xls and .xlsx files • Drop multiple files to merge them
+                  Supports .csv, .xls and .xlsx files • Upload multiple files to merge them
                 </p>
               </div>
 
@@ -1911,13 +2005,18 @@ export default function MimirApp() {
                 <div className="mt-4 space-y-3">
                   <div className="flex items-center justify-between">
                     <h3 className="font-semibold text-foreground">Uploaded Files</h3>
-                    {matchingColumns.length > 0 && (
+                    {uploadedFiles.length >= 2 && (
                       <button
                         onClick={() => setShowMergeModal(true)}
                         className="px-4 py-2 bg-primary text-primary-foreground rounded hover:bg-primary/90 transition-all font-medium text-sm flex items-center gap-2"
                       >
                         <Database className="w-4 h-4" />
-                        Merge Files ({matchingColumns.length} matching columns)
+                        Merge Files
+                        {matchingColumns.length > 0 && (
+                          <span className="text-xs bg-white/20 px-2 py-0.5 rounded">
+                            ({matchingColumns.length} matching columns)
+                          </span>
+                        )}
                       </button>
                     )}
                   </div>
@@ -2244,7 +2343,7 @@ export default function MimirApp() {
                               
                               <div>
                                 <label className="block text-xs font-medium text-foreground mb-1">
-                                  Merge Type
+                                  Merge Type (set this to Full Outer Join for most use cases)
                                 </label>
                                 <select
                                   value={mergeFile.merge_type}

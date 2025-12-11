@@ -562,6 +562,7 @@ def apply_pandas_fixes(code):
     # Remove include_groups=False if LLM outputs it
     code = code.replace(", include_groups=False", "")
     code = code.replace("include_groups=False", "")
+    code = re.sub(r"pd\.to_datetime\(([^)]+)\)", r"pd.to_datetime(\1, errors='coerce', infer_datetime_format=True)", code)
 
     # Add group_keys=False where apply on groupby is used (best-effort)
     if ".groupby(" in code and ".apply(" in code and "group_keys=False" not in code:

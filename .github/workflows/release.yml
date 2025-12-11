@@ -161,14 +161,34 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Generate Python Virtual Environments
+      - name: Generate Python Virtual Environments (Windows)
         run: |
           cd src-tauri/python
-          # On Windows CI, create Windows venv using system Python
-          python -m venv windows-venv
-          .\windows-venv\Scripts\pip install --upgrade pip
-          .\windows-venv\Scripts\pip install -r requirements.txt
-          cd ../../..
+          
+          # Check if Windows PowerShell script exists
+          if (Test-Path "create-venvs.ps1") {
+            echo "Running create-venvs.ps1 for Windows..."
+            Get-Content create-venvs.ps1 | head -5  # Show first few lines for debugging
+            powershell -ExecutionPolicy Bypass -File create-venvs.ps1
+            
+            # Verify the Windows virtual environment was created
+            if (Test-Path "windows-venv") {
+              echo "Windows virtual environment created successfully"
+              echo "Checking Python installation..."
+              .\windows-venv\Scripts\python.exe --version
+              echo "Checking pip installation..."
+              .\windows-venv\Scripts\pip.exe --version
+            } else {
+              echo "ERROR: windows-venv directory not created"
+              exit 1
+            }
+          } else {
+            echo "ERROR: create-venvs.ps1 not found!"
+            echo "Available files:"
+            Get-ChildItem -Path .
+            exit 1
+          }
+          cd ..\..
 
       - name: Install Tauri CLI
         run: cargo install tauri-cli

@@ -2,13 +2,18 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use chrono;
-use dirs;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_updater;
+use calamine::{open_workbook, Reader, Xls, Xlsx};
+use csv::ReaderBuilder;
+use base64::{Engine as _, engine::general_purpose};
 
 // Global API URL constant
 const API_BASE_URL: &str = "https://api.mimiranalysis.com";
@@ -135,6 +140,10 @@ fn load_login(app_handle: &AppHandle) -> Result<RefreshToken, String> {
         .map_err(|e| format!("Failed to get app data dir: {}", e))?;
 
     let login_path = app_dir.join("logininfo.json");
+
+    if !login_path.exists() {
+        return Err("No saved login found".to_string());
+    }
 
     let data = std::fs::read_to_string(&login_path)
         .map_err(|e| format!("Failed to read login info: {}", e))?;
@@ -539,7 +548,7 @@ async fn analyze_query(
     let mut tmp_path = std::env::temp_dir();
     let filename = format!(
         "mimir_history_{}.json",
-        chrono::Utc::now().timestamp_nanos()
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
     );
     tmp_path.push(&filename);
 
@@ -615,68 +624,6 @@ async fn analyze_query(
     Ok(response)
 }
 
-#[tauri::command]
-async fn load_csv_info(
-    csv_path: String,
-    app_handle: tauri::AppHandle,  // Add app_handle as parameter
-) -> Result<Vec<Vec<String>>, String> {
-    use std::path::Path;
-    use std::process::Command;
-
-    let (python_bin, _) = get_python_paths(&app_handle)
-        .map_err(|e| format!("Failed to get Python paths: {}", e))?;
-
-    let ext = Path::new(&csv_path)
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-
-    let read_cmd = match ext.as_str() {
-        "csv" => format!("pd.read_csv(r'{}')", csv_path),
-        "xlsx" | "xls" => format!("pd.read_excel(r'{}')", csv_path),
-        _ => return Err(format!("Unsupported file type: .{}", ext)),
-    };
-
-    let python_code = format!(
-        r#"
-import pandas as pd
-import json
-import sys
-
-try:
-    df = {}
-    # Get column names
-    columns = df.columns.tolist()
-    # Get first 5 rows as strings
-    data = df.head(5).fillna('').astype(str).values.tolist()
-    # Combine columns and data
-    result = [columns] + data
-    print(json.dumps(result))
-except Exception as e:
-    sys.stderr.write(str(e))
-    sys.exit(1)
-"#,
-        read_cmd
-    );
-
-    let output = Command::new(&python_bin)
-        .arg("-c")
-        .arg(python_code)
-        .output()
-        .map_err(|e| format!("Failed to run Python: {}", e))?;
-
-    if !output.status.success() {
-        return Err(format!(
-            "Python error: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    serde_json::from_str(&stdout).map_err(|e| format!("Failed to parse JSON output: {}", e))
-}
-
 // ========== UPDATED PYTHON PATH DETECTION ==========
 
 fn get_python_paths(app_handle: &AppHandle) -> Result<(String, String), String> {
@@ -715,7 +662,7 @@ fn get_python_paths(app_handle: &AppHandle) -> Result<(String, String), String> 
     let python_bin = if cfg!(target_os = "windows") {
         venv_dir.join("Scripts/python.exe")
     } else {
-        venv_dir
+        venv_dir.join("bin/python")
     };
 
     let analyzer_path = python_dir.join("analyzer.py");
@@ -1019,19 +966,326 @@ async fn request_password_reset(app_handle: AppHandle, email: String) -> Result<
     Ok(response_text)
 }
 
+// ========== FILE UPLOAD AND PROCESSING COMMANDS ==========
+
+// Helper function to sanitize filename
+fn sanitize_filename(filename: &str) -> String {
+    let sanitized: String = filename
+        .chars()
+        .map(|c| match c {
+            '<' | '>' | ':' | '"' | '|' | '?' | '*' | '\\' | '/' => '_',
+            _ => c,
+        })
+        .collect();
+    
+    // Trim whitespace and limit length
+    let trimmed = sanitized.trim();
+    if trimmed.is_empty() {
+        return "unnamed_file".to_string();
+    }
+    
+    // Limit to 255 characters (common filesystem limit)
+    if trimmed.len() > 255 {
+        let stem = Path::new(trimmed)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("file");
+        let ext = Path::new(trimmed)
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        
+        let max_stem_len = 255 - ext.len() - if ext.is_empty() { 0 } else { 1 };
+        let truncated_stem = if stem.len() > max_stem_len {
+            &stem[0..max_stem_len]
+        } else {
+            stem
+        };
+        
+        if ext.is_empty() {
+            truncated_stem.to_string()
+        } else {
+            format!("{}.{}", truncated_stem, ext)
+        }
+    } else {
+        trimmed.to_string()
+    }
+}
+
+// Helper function to get unique filename while preserving original name
+fn get_unique_filename(directory: &Path, filename: &str) -> String {
+    let stem = Path::new(filename)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("file");
+    
+    let extension = Path::new(filename)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+    
+    let ext_with_dot = if extension.is_empty() {
+        String::new()
+    } else {
+        format!(".{}", extension)
+    };
+    
+    // Try original filename first
+    if !directory.join(filename).exists() {
+        return filename.to_string();
+    }
+    
+    // Add counter if file exists
+    let mut counter = 1;
+    loop {
+        let new_filename = format!("{}_{}{}", stem, counter, ext_with_dot);
+        if !directory.join(&new_filename).exists() {
+            return new_filename;
+        }
+        counter += 1;
+    }
+}
+
+// Helper function to convert Excel to CSV
+fn convert_excel_to_csv(excel_path: &Path, app_handle: &AppHandle) -> Result<PathBuf, String> {
+    let csv_dir = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data directory: {}", e))?
+        .join("csv_conversions");
+    
+    if !csv_dir.exists() {
+        fs::create_dir_all(&csv_dir)
+            .map_err(|e| format!("Failed to create CSV directory: {}", e))?;
+    }
+
+    // Get original filename without extension
+    let file_stem = excel_path.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("converted");
+    
+    // Check if CSV already exists and add counter if needed
+    let csv_filename = get_unique_filename(&csv_dir, &format!("{}.csv", file_stem));
+    let csv_path = csv_dir.join(&csv_filename);
+
+    // Open Excel file
+    if excel_path.extension().and_then(|ext| ext.to_str()) == Some("xlsx") {
+        let mut workbook: Xlsx<_> = open_workbook(excel_path)
+            .map_err(|e| format!("Failed to open Excel file: {}", e))?;
+        
+        if let Some(Ok(range)) = workbook.worksheet_range_at(0) {
+            let mut wtr = csv::Writer::from_path(&csv_path)
+                .map_err(|e| format!("Failed to create CSV writer: {}", e))?;
+            
+            for row in range.rows() {
+                let record: Vec<String> = row.iter()
+                    .map(|cell| cell.to_string())
+                    .collect();
+                wtr.write_record(&record)
+                    .map_err(|e| format!("Failed to write CSV record: {}", e))?;
+            }
+            
+            wtr.flush()
+                .map_err(|e| format!("Failed to flush CSV writer: {}", e))?;
+        }
+    } else if excel_path.extension().and_then(|ext| ext.to_str()) == Some("xls") {
+        let mut workbook: Xls<_> = open_workbook(excel_path)
+            .map_err(|e| format!("Failed to open Excel file: {}", e))?;
+        
+        if let Some(Ok(range)) = workbook.worksheet_range_at(0) {
+            let mut wtr = csv::Writer::from_path(&csv_path)
+                .map_err(|e| format!("Failed to create CSV writer: {}", e))?;
+            
+            for row in range.rows() {
+                let record: Vec<String> = row.iter()
+                    .map(|cell| cell.to_string())
+                    .collect();
+                wtr.write_record(&record)
+                    .map_err(|e| format!("Failed to write CSV record: {}", e))?;
+            }
+            
+            wtr.flush()
+                .map_err(|e| format!("Failed to flush CSV writer: {}", e))?;
+        }
+    }
+
+    Ok(csv_path)
+}
+
+#[tauri::command]
+async fn upload_file(
+    app_handle: AppHandle,
+    file_name: String,
+    file_data: Vec<u8>,
+) -> Result<String, String> {
+    // Create uploads directory if it doesn't exist
+    let uploads_dir = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data directory: {}", e))?
+        .join("uploads");
+    
+    if !uploads_dir.exists() {
+        fs::create_dir_all(&uploads_dir)
+            .map_err(|e| format!("Failed to create uploads directory: {}", e))?;
+    }
+
+    // Sanitize the filename
+    let sanitized_name = sanitize_filename(&file_name);
+    
+    // Check if file already exists and add counter if needed
+    let unique_filename = get_unique_filename(&uploads_dir, &sanitized_name);
+    let file_path = uploads_dir.join(&unique_filename);
+
+    // Write file data
+    fs::write(&file_path, &file_data)
+        .map_err(|e| format!("Failed to write file: {}", e))?;
+
+    // Convert to CSV if it's an Excel file
+    let file_extension = Path::new(&file_name)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("csv")
+        .to_string()
+        .to_lowercase();
+
+    let final_path = if file_extension == "xlsx" || file_extension == "xls" {
+        convert_excel_to_csv(&file_path, &app_handle)?
+            .to_string_lossy()
+            .to_string()
+    } else {
+        file_path.to_string_lossy().to_string()
+    };
+
+    Ok(final_path)
+}
+
+#[tauri::command]
+async fn load_csv_info(
+    csv_path: String,
+) -> Result<Vec<Vec<String>>, String> {
+    let path = Path::new(&csv_path);
+    if !path.exists() {
+        return Err("File does not exist".to_string());
+    }
+
+    // Check file extension
+    let ext = path.extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    if ext == "csv" {
+        // Use CSV reader for CSV files
+        let mut reader = ReaderBuilder::new()
+            .has_headers(true)
+            .from_path(path)
+            .map_err(|e| format!("Failed to read CSV: {}", e))?;
+
+        let mut result = Vec::new();
+        
+        // Read headers
+        if let Some(headers) = reader.headers().ok() {
+            let header_row: Vec<String> = headers.iter().map(|h| h.to_string()).collect();
+            result.push(header_row);
+        }
+
+        // Read first 5 rows
+        for (i, record) in reader.records().enumerate() {
+            if i >= 5 {
+                break;
+            }
+            
+            match record {
+                Ok(r) => {
+                    let row: Vec<String> = r.iter().map(|field| field.to_string()).collect();
+                    result.push(row);
+                }
+                Err(e) => {
+                    return Err(format!("Error reading row {}: {}", i + 1, e));
+                }
+            }
+        }
+
+        Ok(result)
+    } else if ext == "xlsx" || ext == "xls" {
+        // Use Python to read Excel files (more reliable than calamine for all Excel features)
+        let output = Command::new("python")
+            .arg("-c")
+            .arg(format!(
+                r#"
+import pandas as pd
+import json
+import sys
+
+try:
+    df = pd.read_excel(r'{}')
+    # Get column names
+    columns = df.columns.tolist()
+    # Get first 5 rows as strings
+    data = df.head(5).fillna('').astype(str).values.tolist()
+    # Combine columns and data
+    result = [columns] + data
+    print(json.dumps(result))
+except Exception as e:
+    sys.stderr.write(str(e))
+    sys.exit(1)
+"#,
+                csv_path
+            ))
+            .output()
+            .or_else(|_| {
+                // Fallback to python3 if python doesn't work
+                Command::new("python3")
+                    .arg("-c")
+                    .arg(format!(
+                        r#"
+import pandas as pd
+import json
+import sys
+
+try:
+    df = pd.read_excel(r'{}')
+    # Get column names
+    columns = df.columns.tolist()
+    # Get first 5 rows as strings
+    data = df.head(5).fillna('').astype(str).values.tolist()
+    # Combine columns and data
+    result = [columns] + data
+    print(json.dumps(result))
+except Exception as e:
+    sys.stderr.write(str(e))
+    sys.exit(1)
+"#,
+                        csv_path
+                    ))
+                    .output()
+            })
+            .map_err(|e| format!("Failed to run Python: {}", e))?;
+
+        if !output.status.success() {
+            return Err(format!(
+                "Python error: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        serde_json::from_str(&stdout).map_err(|e| format!("Failed to parse JSON output: {}", e))
+    } else {
+        Err(format!("Unsupported file type: .{}", ext))
+    }
+}
+
 #[tauri::command]
 async fn merge_files(
     primary_path: String,
-    app_handle: tauri::AppHandle,  // Add app_handle as parameter
     secondary_path: String,
     merge_column: String,
     merge_type: String, // "inner", "left", "right", "outer"
 ) -> Result<String, String> {
-    use std::process::Command;
     use uuid::Uuid;
-
-    let (python_bin, _) = get_python_paths(&app_handle)
-        .map_err(|e| format!("Failed to get Python paths: {}", e))?;
 
     let output_dir = std::env::temp_dir();
     let output_filename = format!("merged_{}.csv", Uuid::new_v4());
@@ -1073,10 +1327,16 @@ except Exception as e:
         output_path.to_string_lossy()
     );
 
-    let output = Command::new(&python_bin)
+    let output = Command::new("python")
         .arg("-c")
-        .arg(python_code)
+        .arg(&python_code)
         .output()
+        .or_else(|_| {
+            Command::new("python3")
+                .arg("-c")
+                .arg(&python_code)
+                .output()
+        })
         .map_err(|e| format!("Failed to run Python: {}", e))?;
 
     if !output.status.success() {
@@ -1098,115 +1358,269 @@ except Exception as e:
 async fn merge_multiple_files(
     primary_path: String,
     merge_configs: Vec<MergeConfig>,
-    app_handle: tauri::AppHandle,  // Add app_handle as parameter
+    app_handle: AppHandle,
 ) -> Result<String, String> {
-    use std::process::Command;
-    use std::path::Path;
-    use uuid::Uuid;
-
-    let (python_bin, _) = get_python_paths(&app_handle)
-        .map_err(|e| format!("Failed to get Python paths: {}", e))?;
-
-    let output_dir = std::env::temp_dir();
-    let output_filename = format!("merged_{}.csv", Uuid::new_v4());
+    // Generate output path
+    let output_filename = format!("merged_{}.csv", chrono::Local::now().format("%Y%m%d_%H%M%S"));
+    let output_dir = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data directory: {}", e))?
+        .join("merged_files");
+    
+    if !output_dir.exists() {
+        fs::create_dir_all(&output_dir)
+            .map_err(|e| format!("Failed to create merged files directory: {}", e))?;
+    }
+    
     let output_path = output_dir.join(&output_filename);
 
-    // Build file reading code for all files to merge
-    let file_reading_code = merge_configs.iter().enumerate().map(|(index, config)| {
-        format!(
-            "    df_{} = pd.read_csv(r'{}') if r'{}'.endswith('.csv') else pd.read_excel(r'{}')",
-            index + 1, config.file_path, config.file_path, config.file_path
-        )
-    }).collect::<Vec<_>>().join("\n");
-
-    // Build merge operations
-    let mut merge_operations = String::new();
-    
-    for (index, config) in merge_configs.iter().enumerate() {
-        let merge_code = format!(
-            r#"
-    # Merge operation {}: {} with {}
-    df_merged = pd.merge(
-        df_merged, 
-        df_{}, 
-        left_on='{}', 
-        right_on='{}', 
-        how='{}', 
-        suffixes=('', '_{}')
-    )
-"#,
-            index + 1,
-            if index == 0 { "primary".to_string() } else { format!("merged_{}", index) },
-            Path::new(&config.file_path).file_name().unwrap().to_string_lossy(),
-            index + 1,
-            config.merge_column,
-            config.merge_column,
-            config.merge_type,
-            index + 1
-        );
-        merge_operations.push_str(&merge_code);
+    // Helper function to escape Windows paths
+    fn escape_path(path: &str) -> String {
+        path.replace('\\', "\\\\")
     }
 
-    let python_code = format!(
+    // Build Python code for merging multiple files
+    let mut python_code = String::from(
         r#"
 import pandas as pd
 import sys
+import os
 
 try:
-    # Read primary file
-    df_merged = pd.read_csv(r'{}') if r'{}'.endswith('.csv') else pd.read_excel(r'{}')
-    
-    # Read all files to merge
-{}
-
-    # Perform all merge operations
-{}
-    
-    # Remove duplicate columns (keep first occurrence)
-    df_merged = df_merged.loc[:, ~df_merged.columns.duplicated()]
-    
-    # Save merged file
-    df_merged.to_csv(r'{}', index=False)
-    print(r'{}')
-    
-except Exception as e:
-    sys.stderr.write(str(e))
-    sys.exit(1)
-"#,
-        primary_path, 
-        primary_path, 
-        primary_path,
-        file_reading_code,
-        merge_operations,
-        output_path.to_string_lossy(),
-        output_path.to_string_lossy()
+"#
     );
 
-    println!("Executing Python code:\n{}", python_code);
+    // Add primary dataframe
+    let primary_path_escaped = escape_path(&primary_path);
+    
+    python_code.push_str(&format!(
+        "    # Read primary dataframe\n    primary_path = r'{}'\n",
+        primary_path_escaped
+    ));
+    
+    python_code.push_str(&format!(
+        "    if not os.path.exists(primary_path):\n        raise FileNotFoundError(f\"Primary file not found: {{primary_path}}\")\n"
+    ));
+    
+    python_code.push_str(&format!(
+        "    df_merged = pd.read_csv(primary_path) if primary_path.lower().endswith('.csv') else pd.read_excel(primary_path)\n"
+    ));
 
-    let output = Command::new(&python_bin)
-        .arg("-c")
-        .arg(python_code)
-        .output()
-        .map_err(|e| format!("Failed to run Python: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        return Err(format!(
-            "Merge failed:\nSTDERR: {}\nSTDOUT: {}",
-            stderr, stdout
+    // Add merge operations for each config
+    for (i, config) in merge_configs.iter().enumerate() {
+        let file_path_escaped = escape_path(&config.file_path);
+        
+        python_code.push_str(&format!(
+            "\n    # Merge with file {}: {}\n",
+            i + 1,
+            config.file_path
+        ));
+        
+        python_code.push_str(&format!(
+            "    file_path{} = r'{}'\n",
+            i,
+            file_path_escaped
+        ));
+        
+        python_code.push_str(&format!(
+            "    if not os.path.exists(file_path{}):\n        raise FileNotFoundError(f\"File {{file_path{}}} not found\")\n",
+            i, i
+        ));
+        
+        python_code.push_str(&format!(
+            "    df{} = pd.read_csv(file_path{}) if file_path{}.lower().endswith('.csv') else pd.read_excel(file_path{})\n",
+            i, i, i, i
+        ));
+        
+        python_code.push_str(&format!(
+            "    # Verify merge column exists\n    if '{}' not in df_merged.columns:\n        raise ValueError(\"Merge column '{}' not found in merged dataframe. Available columns: {{}}\".format(list(df_merged.columns)))\n",
+            config.merge_column, config.merge_column
+        ));
+        
+        python_code.push_str(&format!(
+            "    if '{}' not in df{}.columns:\n        raise ValueError(\"Merge column '{}' not found in file: {{}}. Available columns: {{}}\".format(file_path{}, list(df{}.columns)))\n",
+            config.merge_column, i, config.merge_column, i, i
+        ));
+        
+        python_code.push_str(&format!(
+            "    df_merged = pd.merge(df_merged, df{}, on='{}', how='{}', suffixes=('', '_{}'))\n",
+            i, config.merge_column, config.merge_type, i
         ));
     }
 
-    // Verify the file was created
+    let output_path_escaped = escape_path(&output_path.to_string_lossy());
+    python_code.push_str(&format!(
+        "\n    # Save merged file\n    output_path = r'{}'\n    df_merged.to_csv(output_path, index=False)\n    print('SUCCESS:' + output_path)\n",
+        output_path_escaped
+    ));
+
+    python_code.push_str(
+        r#"
+except Exception as e:
+    sys.stderr.write('ERROR: ' + str(e))
+    sys.exit(1)
+"#,
+    );
+
+    println!("=== MERGE PYTHON CODE ===");
+    println!("{}", python_code);
+    println!("=========================");
+
+    // Try to use the embedded Python first
+    let python_bin = get_python_paths(&app_handle)
+        .map(|(python_bin, _)| python_bin)
+        .unwrap_or_else(|_| {
+            println!("Warning: Could not get embedded Python, trying system Python");
+            "python".to_string()
+        });
+
+    let mut command = Command::new(&python_bin);
+    command.arg("-c");
+    command.arg(&python_code);
+    
+    // Add environment variables
+    command.env("PYTHONUTF8", "1");
+    command.env("PYTHONIOENCODING", "utf-8");
+    
+    // On Windows, suppress the console window
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let output = match command.output() {
+        Ok(output) => output,
+        Err(e) => {
+            println!("Embedded Python failed: {}, trying system python", e);
+            
+            // Try with system python
+            let mut sys_command = Command::new("python");
+            sys_command.arg("-c");
+            sys_command.arg(&python_code);
+            
+            #[cfg(target_os = "windows")]
+            {
+                use std::os::windows::process::CommandExt;
+                const CREATE_NO_WINDOW: u32 = 0x08000000;
+                sys_command.creation_flags(CREATE_NO_WINDOW);
+            }
+            
+            match sys_command.output() {
+                Ok(output) => output,
+                Err(_) => {
+                    // Try python3 as last resort
+                    let mut py3_command = Command::new("python3");
+                    py3_command.arg("-c");
+                    py3_command.arg(&python_code);
+                    
+                    #[cfg(target_os = "windows")]
+                    {
+                        use std::os::windows::process::CommandExt;
+                        const CREATE_NO_WINDOW: u32 = 0x08000000;
+                        py3_command.creation_flags(CREATE_NO_WINDOW);
+                    }
+                    
+                    py3_command.output()
+                        .map_err(|e| format!("All Python attempts failed: {}", e))?
+                }
+            }
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    
+    println!("=== MERGE STDOUT ===");
+    println!("{}", stdout);
+    println!("=== MERGE STDERR ===");
+    println!("{}", stderr);
+    println!("====================");
+
+    if !output.status.success() {
+        return Err(format!(
+            "Merge failed: {}",
+            stderr
+        ));
+    }
+
+    // Extract the success path from stdout
+    if let Some(success_line) = stdout.lines().find(|line| line.starts_with("SUCCESS:")) {
+        let path = success_line.trim_start_matches("SUCCESS:").trim();
+        if std::path::Path::new(path).exists() {
+            return Ok(path.to_string());
+        }
+    }
+
+    // Fallback: check if the file was created
     if !output_path.exists() {
-        return Err("Merged file was not created".to_string());
+        return Err(format!("Merged file was not created. Python output: {}", stdout));
     }
 
     Ok(output_path.to_string_lossy().to_string())
 }
 
+#[tauri::command]
+async fn save_and_process_file(
+    app_handle: AppHandle,
+    file_name: String,
+    file_data: String,
+    is_base64: bool,
+) -> Result<String, String> {
+    // Create uploads directory
+    let uploads_dir = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data directory: {}", e))?
+        .join("uploads");
+    
+    if !uploads_dir.exists() {
+        fs::create_dir_all(&uploads_dir)
+            .map_err(|e| format!("Failed to create uploads directory: {}", e))?;
+    }
+
+    // Sanitize and get unique filename
+    let sanitized_name = sanitize_filename(&file_name);
+    let unique_filename = get_unique_filename(&uploads_dir, &sanitized_name);
+    let file_path = uploads_dir.join(&unique_filename);
+
+    // Write the file
+    let mut file = fs::File::create(&file_path)
+        .map_err(|e| format!("Failed to create file: {}", e))?;
+    
+    if is_base64 {
+        // Decode base64 data using the new API
+        let decoded = general_purpose::STANDARD
+            .decode(&file_data)
+            .map_err(|e| format!("Failed to decode base64: {}", e))?;
+        file.write_all(&decoded)
+            .map_err(|e| format!("Failed to write file: {}", e))?;
+    } else {
+        // Write raw data
+        file.write_all(file_data.as_bytes())
+            .map_err(|e| format!("Failed to write file: {}", e))?;
+    }
+
+    // Convert to CSV if it's an Excel file
+    let file_extension = Path::new(&file_name)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("csv")
+        .to_string()
+        .to_lowercase();
+
+    let final_path = if file_extension == "xlsx" || file_extension == "xls" {
+        convert_excel_to_csv(&file_path, &app_handle)?
+            .to_string_lossy()
+            .to_string()
+    } else {
+        file_path.to_string_lossy().to_string()
+    };
+
+    Ok(final_path)
+}
 
 fn main() {
     println!("Starting Mimir application");
@@ -1249,8 +1663,6 @@ fn main() {
             delete_chat,
             set_csv_path,
             get_csv_path,
-            merge_multiple_files,
-
             clear_history,
             get_history,
             save_history,
@@ -1259,6 +1671,9 @@ fn main() {
             analyze_query,
             load_csv_info,
             merge_files,
+            merge_multiple_files,
+            upload_file,
+            save_and_process_file,
             login,
             logout,
             refresh_token,
@@ -1273,7 +1688,8 @@ fn load_chats_sync(
     app_handle: &tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
-    let app_dir = app_handle .path()
+    let app_dir = app_handle
+        .path()
         .app_data_dir()
         .map_err(|e| format!("Failed to get app data dir: {}", e))?;
 
