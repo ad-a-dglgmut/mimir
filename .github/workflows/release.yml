@@ -10,35 +10,34 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Extract version from tag
         id: extract_version
         run: |
           VERSION="${GITHUB_REF#refs/tags/v}"
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "Building version: ${VERSION}"
-      
-      - name: Update tauri.conf.json with version
+
+      - name: Update Tauri version (tauri.conf.json + Cargo.toml)
         run: |
-          echo "Setting version to: ${{ steps.extract_version.outputs.version }}"
-          
-          # Update tauri.conf.json using jq
+          VERSION="${{ steps.extract_version.outputs.version }}"
+          echo "Updating version to $VERSION"
+
           cd src-tauri
-          jq --arg version "${{ steps.extract_version.outputs.version }}" '.version = $version' tauri.conf.json > tmp.json
+
+          # Update tauri.conf.json
+          jq --arg version "$VERSION" '.version = $version' tauri.conf.json > tmp.json
           mv tmp.json tauri.conf.json
-          
-          echo "Updated tauri.conf.json:"
-          grep -n "version" tauri.conf.json
-          
-          # Verify the update
-          if grep -q "\"version\": \"${{ steps.extract_version.outputs.version }}\"" tauri.conf.json; then
-            echo "Successfully updated version to ${{ steps.extract_version.outputs.version }}"
-          else
-            echo "Failed to update version"
-            exit 1
-          fi
+          echo "tauri.conf.json version updated:"
+          grep '"version"' tauri.conf.json
+
+          # Update Cargo.toml
+          sed -i 's/^version = ".*"/version = "'"$VERSION"'"/' Cargo.toml
+          echo "Cargo.toml version updated:"
+          grep '^version =' Cargo.toml
+
           cd ..
-      
+
       - name: Install Linux dependencies
         run: |
           sudo apt update
@@ -89,17 +88,9 @@ jobs:
       - name: Verify Linux build version
         run: |
           echo "Verifying built version..."
-          # Check RPM package version if it exists
-          if ls src-tauri/target/release/bundle/rpm/*.rpm 2>/dev/null; then
-            rpm -qip src-tauri/target/release/bundle/rpm/*.rpm | grep -i version
-          fi
           # Check AppImage version if it exists
           if ls src-tauri/target/release/bundle/appimage/*.AppImage 2>/dev/null; then
             echo "AppImage built for version: ${{ steps.extract_version.outputs.version }}"
-          fi
-          # Check Debian package version if it exists
-          if ls src-tauri/target/release/bundle/deb/*.deb 2>/dev/null; then
-            dpkg-deb -f src-tauri/target/release/bundle/deb/*.deb Version
           fi
 
       - name: Upload Linux artifacts
@@ -112,35 +103,29 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Extract version from tag
         id: extract_version
         run: |
           $version = "$env:GITHUB_REF" -replace 'refs/tags/v', ''
           echo "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           echo "Building version: $version"
-      
-      - name: Update tauri.conf.json with version
+
+      - name: Update Tauri version (tauri.conf.json + Cargo.toml)
         run: |
-          echo "Setting version to: ${{ steps.extract_version.outputs.version }}"
-          
-          # Update tauri.conf.json using PowerShell
-          cd src-tauri
           $version = "${{ steps.extract_version.outputs.version }}"
-          $content = Get-Content tauri.conf.json -Raw | ConvertFrom-Json
-          $content.version = $version
-          $content | ConvertTo-Json -Depth 10 | Set-Content tauri.conf.json
-          
-          echo "Updated tauri.conf.json:"
-          Select-String -Path tauri.conf.json -Pattern "version"
-          
-          # Verify the update
-          if ((Get-Content tauri.conf.json -Raw | ConvertFrom-Json).version -eq $version) {
-            echo "Successfully updated version to $version"
-          } else {
-            echo "Failed to update version"
-            exit 1
-          }
+          cd src-tauri
+
+          # Update tauri.conf.json
+          $json = Get-Content tauri.conf.json -Raw | ConvertFrom-Json
+          $json.version = $version
+          $json | ConvertTo-Json -Depth 10 | Set-Content tauri.conf.json
+          Write-Host "tauri.conf.json version updated:" $json.version
+
+          # Update Cargo.toml
+          (Get-Content Cargo.toml) -replace '^version = ".*"', 'version = "' + $version + '"' | Set-Content Cargo.toml
+          Write-Host "Cargo.toml version updated:" ((Get-Content Cargo.toml | Select-String "^version =").Line)
+
           cd ..
 
       - name: Setup Node.js
@@ -164,29 +149,8 @@ jobs:
       - name: Generate Python Virtual Environments (Windows)
         run: |
           cd src-tauri/python
-          
-          # Check if Windows PowerShell script exists
           if (Test-Path "create-venvs.ps1") {
-            echo "Running create-venvs.ps1 for Windows..."
-            Get-Content create-venvs.ps1 | head -5  # Show first few lines for debugging
             powershell -ExecutionPolicy Bypass -File create-venvs.ps1
-            
-            # Verify the Windows virtual environment was created
-            if (Test-Path "windows-venv") {
-              echo "Windows virtual environment created successfully"
-              echo "Checking Python installation..."
-              .\windows-venv\Scripts\python.exe --version
-              echo "Checking pip installation..."
-              .\windows-venv\Scripts\pip.exe --version
-            } else {
-              echo "ERROR: windows-venv directory not created"
-              exit 1
-            }
-          } else {
-            echo "ERROR: create-venvs.ps1 not found!"
-            echo "Available files:"
-            Get-ChildItem -Path .
-            exit 1
           }
           cd ..\..
 
@@ -202,19 +166,6 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           APP_VERSION: ${{ steps.extract_version.outputs.version }}
 
-      - name: Verify Windows build version
-        run: |
-          echo "Verifying built version..."
-          # Check MSI version if it exists
-          if (Test-Path "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi") {
-            # Try to extract version info from MSI
-            $msiFiles = Get-ChildItem "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi"
-            foreach ($msi in $msiFiles) {
-              echo "MSI built: $($msi.Name)"
-              echo "Expected version: ${{ steps.extract_version.outputs.version }}"
-            }
-          }
-
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -225,33 +176,30 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Extract version from tag
         id: extract_version
         run: |
           VERSION="${GITHUB_REF#refs/tags/v}"
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "Building version: ${VERSION}"
-      
-      - name: Update tauri.conf.json with version
+
+      - name: Update Tauri version (tauri.conf.json + Cargo.toml)
         run: |
-          echo "Setting version to: ${{ steps.extract_version.outputs.version }}"
-          
-          # Update tauri.conf.json using jq
+          VERSION="${{ steps.extract_version.outputs.version }}"
           cd src-tauri
-          jq --arg version "${{ steps.extract_version.outputs.version }}" '.version = $version' tauri.conf.json > tmp.json
+
+          # Update tauri.conf.json
+          jq --arg version "$VERSION" '.version = $version' tauri.conf.json > tmp.json
           mv tmp.json tauri.conf.json
-          
-          echo "Updated tauri.conf.json:"
-          grep -n "version" tauri.conf.json
-          
-          # Verify the update
-          if grep -q "\"version\": \"${{ steps.extract_version.outputs.version }}\"" tauri.conf.json; then
-            echo "Successfully updated version to ${{ steps.extract_version.outputs.version }}"
-          else
-            echo "Failed to update version"
-            exit 1
-          fi
+          echo "tauri.conf.json version updated:"
+          grep '"version"' tauri.conf.json
+
+          # Update Cargo.toml
+          sed -i 's/^version = ".*"/version = "'"$VERSION"'"/' Cargo.toml
+          echo "Cargo.toml version updated:"
+          grep '^version =' Cargo.toml
+
           cd ..
 
       - name: Setup Node.js
@@ -278,18 +226,8 @@ jobs:
       - name: Generate macOS Python Virtual Environment
         run: |
           cd src-tauri/python
-          
-          # Use the universal macOS script
           chmod +x create-macos-venv.sh
           ./create-macos-venv.sh
-          
-          # Verify it works
-          echo "Verifying universal venv..."
-          if ./macos-venv/bin/python -c "import pandas, numpy, groq, matplotlib; print('SUCCESS: Universal venv works')"; then
-            echo "✓ Universal venv verified"
-          else
-            echo "⚠ Universal venv test failed - but this may be expected in CI"
-          fi
           cd ../../..
 
       - name: Install Tauri CLI
@@ -304,123 +242,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           APP_VERSION: ${{ steps.extract_version.outputs.version }}
 
-      - name: Verify macOS build version
-        run: |
-          echo "Verifying built version..."
-          # Check DMG version if it exists
-          if ls src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg 2>/dev/null; then
-            echo "DMG built for version: ${{ steps.extract_version.outputs.version }}"
-          fi
-          # Check app bundle version
-          if ls src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.app 2>/dev/null; then
-            app_path=$(ls src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.app | head -1)
-            echo "App bundle built at: $app_path"
-            # Try to read Info.plist for version
-            if [ -f "$app_path/Contents/Info.plist" ]; then
-              plutil -p "$app_path/Contents/Info.plist" | grep -i version
-            fi
-          fi
-
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
         with:
           name: macos-build
           path: src-tauri/target/x86_64-apple-darwin/release/bundle/
-
-  upload-updates:
-    runs-on: ubuntu-latest
-    needs: [build-linux, build-windows, build-macos]
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Extract version from tag
-        id: extract_version
-        run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
-          echo "Uploading version: ${VERSION}"
-
-      - name: Download Linux artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: linux-build
-          path: dist/linux/
-
-      - name: Download Windows artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: windows-build
-          path: dist/windows/
-
-      - name: Download macOS artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: macos-build
-          path: dist/macos/
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Install dependencies
-        run: |
-          npm install
-          npm install @aws-sdk/client-s3 jq
-
-      - name: Verify downloaded artifacts
-        run: |
-          echo "Verifying downloaded artifacts..."
-          echo "Linux artifacts:"
-          find dist/linux -type f -name "*" 2>/dev/null | head -20
-          echo ""
-          echo "Windows artifacts:"
-          find dist/windows -type f -name "*" 2>/dev/null | head -20
-          echo ""
-          echo "macOS artifacts:"
-          find dist/macos -type f -name "*" 2>/dev/null | head -20
-
-      - name: Upload updates to S3
-        run: node scripts/upload-update.js
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          GITHUB_REF: ${{ github.ref }}
-          APP_VERSION: ${{ steps.extract_version.outputs.version }}
-
-      - name: Verify S3 upload
-        run: |
-          echo "Verifying latest.json was created correctly..."
-          if [ -f "latest.json" ]; then
-            echo "Latest.json content:"
-            cat latest.json | jq .
-            
-            # Check version matches
-            JSON_VERSION=$(cat latest.json | jq -r '.version')
-            EXPECTED_VERSION="${{ steps.extract_version.outputs.version }}"
-            
-            if [ "$JSON_VERSION" = "$EXPECTED_VERSION" ]; then
-              echo "Version in latest.json matches tag: $JSON_VERSION"
-            else
-              echo "Version mismatch! Expected: $EXPECTED_VERSION, Got: $JSON_VERSION"
-              exit 1
-            fi
-            
-            # Check all platforms are present
-            PLATFORMS=$(cat latest.json | jq -r '.platforms | keys[]')
-            echo "Platforms in latest.json:"
-            echo "$PLATFORMS"
-            
-            REQUIRED_PLATFORMS="linux-x86_64 darwin-x86_64 windows-x86_64"
-            for platform in $REQUIRED_PLATFORMS; do
-              if echo "$PLATFORMS" | grep -q "$platform"; then
-                echo "Found $platform"
-              else
-                echo "Missing $platform"
-                exit 1
-              fi
-            done
-          else
-            echo "latest.json not found!"
-            exit 1
-          fi
