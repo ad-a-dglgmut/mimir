@@ -111,9 +111,11 @@ jobs:
           echo "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           echo "Building version: $version"
 
-      - name: Update Tauri version (tauri.conf.json + Cargo.toml)
+      - name: Update Tauri version (tauri.conf.json + Cargo.toml) - Windows
         run: |
           $version = "${{ steps.extract_version.outputs.version }}"
+          Write-Host "Updating version to $version"
+
           cd src-tauri
 
           # Update tauri.conf.json
@@ -123,10 +125,10 @@ jobs:
           Write-Host "tauri.conf.json version updated:" $json.version
 
           # Update Cargo.toml
-          (Get-Content Cargo.toml) -replace '^version = ".*"', 'version = "' + $version + '"' | Set-Content Cargo.toml
-          Write-Host "Cargo.toml version updated:" ((Get-Content Cargo.toml | Select-String "^version =").Line)
-
-          cd ..
+          $content = Get-Content Cargo.toml
+          $replacement = 'version = "' + $version + '"'
+          $content -replace '^version = ".*"', $replacement | Set-Content Cargo.toml
+          Write-Host "Cargo.toml version updated:" ((Get-Content Cargo.toml | Select-String '^version =').Line)
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -172,78 +174,78 @@ jobs:
           name: windows-build
           path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/
 
-  build-macos:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Extract version from tag
-        id: extract_version
-        run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
-          echo "Building version: ${VERSION}"
-
-      - name: Update Tauri version (tauri.conf.json + Cargo.toml)
-        run: |
-          VERSION="${{ steps.extract_version.outputs.version }}"
-          cd src-tauri
-
-          # Update tauri.conf.json
-          jq --arg version "$VERSION" '.version = $version' tauri.conf.json > tmp.json
-          mv tmp.json tauri.conf.json
-          echo "tauri.conf.json version updated:"
-          grep '"version"' tauri.conf.json
-
-          # Update Cargo.toml
-          sed -i 's/^version = ".*"/version = "'"$VERSION"'"/' Cargo.toml
-          echo "Cargo.toml version updated:"
-          grep '^version =' Cargo.toml
-
-          cd ..
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Install JS dependencies
-        run: npm install
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-apple-darwin
-
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-
-      - name: Install venv-pack
-        run: pip install venv-pack
-
-      - name: Generate macOS Python Virtual Environment
-        run: |
-          cd src-tauri/python
-          chmod +x create-macos-venv.sh
-          ./create-macos-venv.sh
-          cd ../../..
-
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli
-
-      - name: Build frontend
-        run: npm run build
-
-      - name: Build Tauri app (macOS)
-        run: npm run tauri build -- --target x86_64-apple-darwin --bundles app
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          APP_VERSION: ${{ steps.extract_version.outputs.version }}
-
-      - name: Upload macOS artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-build
-          path: src-tauri/target/x86_64-apple-darwin/release/bundle/
+  # build-macos:
+  #   runs-on: macos-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #
+  #     - name: Extract version from tag
+  #       id: extract_version
+  #       run: |
+  #         VERSION="${GITHUB_REF#refs/tags/v}"
+  #         echo "version=${VERSION}" >> $GITHUB_OUTPUT
+  #         echo "Building version: ${VERSION}"
+  #
+  #     - name: Update Tauri version (tauri.conf.json + Cargo.toml)
+  #       run: |
+  #         VERSION="${{ steps.extract_version.outputs.version }}"
+  #         cd src-tauri
+  #
+  #         # Update tauri.conf.json
+  #         jq --arg version "$VERSION" '.version = $version' tauri.conf.json > tmp.json
+  #         mv tmp.json tauri.conf.json
+  #         echo "tauri.conf.json version updated:"
+  #         grep '"version"' tauri.conf.json
+  #
+  #         # Update Cargo.toml
+  #         sed -i 's/^version = ".*"/version = "'"$VERSION"'"/' Cargo.toml
+  #         echo "Cargo.toml version updated:"
+  #         grep '^version =' Cargo.toml
+  #
+  #         cd ..
+  #
+  #     - name: Setup Node.js
+  #       uses: actions/setup-node@v4
+  #       with:
+  #         node-version: 20
+  #
+  #     - name: Install JS dependencies
+  #       run: npm install
+  #
+  #     - name: Setup Rust
+  #       uses: dtolnay/rust-toolchain@stable
+  #       with:
+  #         targets: x86_64-apple-darwin
+  #
+  #     - name: Setup Python
+  #       uses: actions/setup-python@v4
+  #       with:
+  #         python-version: '3.11'
+  #
+  #     - name: Install venv-pack
+  #       run: pip install venv-pack
+  #
+  #     - name: Generate macOS Python Virtual Environment
+  #       run: |
+  #         cd src-tauri/python
+  #         chmod +x create-macos-venv.sh
+  #         ./create-macos-venv.sh
+  #         cd ../../..
+  #
+  #     - name: Install Tauri CLI
+  #       run: cargo install tauri-cli
+  #
+  #     - name: Build frontend
+  #       run: npm run build
+  #
+  #     - name: Build Tauri app (macOS)
+  #       run: npm run tauri build -- --target x86_64-apple-darwin --bundles app
+  #       env:
+  #         TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+  #         APP_VERSION: ${{ steps.extract_version.outputs.version }}
+  #
+  #     - name: Upload macOS artifacts
+  #       uses: actions/upload-artifact@v4
+  #       with:
+  #         name: macos-build
+  #         path: src-tauri/target/x86_64-apple-darwin/release/bundle/
