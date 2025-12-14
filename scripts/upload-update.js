@@ -25,24 +25,27 @@ const platformDirs = {
 
 function findFiles(dir) {
   if (!fs.existsSync(dir)) return [];
-  return fs.readdirSync(dir, { recursive: true })
+  return fs
+    .readdirSync(dir, { recursive: true })
     .map(f => path.join(dir, f))
     .filter(f => fs.statSync(f).isFile());
 }
 
 function detectPlatform(file) {
-  if (file.includes("linux")) return "linux-x86_64";
-  if (file.includes("windows")) return "windows-x86_64";
-  if (file.includes("macos") || file.includes("darwin")) return "darwin-x86_64";
+  if (file.endsWith(".AppImage")) return "linux-x86_64";
+  if (file.endsWith(".msi")) return "windows-x86_64";
+  if (file.endsWith(".app.tar.gz")) return "darwin-x86_64";
   return null;
 }
 
 async function upload(file, key) {
-  await s3.send(new PutObjectCommand({
-    Bucket: bucket,
-    Key: key,
-    Body: fs.readFileSync(file),
-  }));
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: key,
+      Body: fs.readFileSync(file),
+    })
+  );
 }
 
 async function main() {
@@ -54,7 +57,15 @@ async function main() {
   };
 
   for (const [name, dir] of Object.entries(platformDirs)) {
-    const files = findFiles(dir).filter(f => f.endsWith(".tar.gz") || f.endsWith(".zip"));
+    if (!fs.existsSync(dir)) continue;
+
+    const files = findFiles(dir).filter(
+      f =>
+        f.endsWith(".AppImage") ||
+        f.endsWith(".msi") ||
+        f.endsWith(".app.tar.gz")
+    );
+
     for (const file of files) {
       const sig = `${file}.sig`;
       if (!fs.existsSync(sig)) continue;
@@ -77,12 +88,14 @@ async function main() {
 
   fs.writeFileSync("latest.json", JSON.stringify(latest, null, 2));
 
-  await s3.send(new PutObjectCommand({
-    Bucket: bucket,
-    Key: "updates/latest.json",
-    Body: JSON.stringify(latest, null, 2),
-    ContentType: "application/json",
-  }));
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: "updates/latest.json",
+      Body: JSON.stringify(latest, null, 2),
+      ContentType: "application/json",
+    })
+  );
 
   console.log("latest.json published");
   console.log("version:", version);
