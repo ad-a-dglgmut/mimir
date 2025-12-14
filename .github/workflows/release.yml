@@ -93,7 +93,7 @@ jobs:
           $content = Get-Content Cargo.toml
           $content -replace '^version = ".*"', "version = `"$version`"" | Set-Content Cargo.toml
 
-          Select-String Cargo.toml '^version ='
+          Select-String -Path Cargo.toml -Pattern '^version ='
 
       - uses: actions/setup-node@v4
         with:
