@@ -5,9 +5,14 @@ on:
     tags:
       - 'v*'
 
+env:
+  TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+  TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
 jobs:
   build-linux:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
@@ -28,15 +33,17 @@ jobs:
 
           sed -i 's/^version = ".*"/version = "'"$VERSION"'"/' Cargo.toml
 
-          echo "tauri.conf.json:"
           grep '"version"' tauri.conf.json
-          echo "Cargo.toml:"
           grep '^version =' Cargo.toml
 
-      - name: Install dependencies
+      - name: Install Linux dependencies
         run: |
           sudo apt update
-          sudo apt install -y jq libwebkit2gtk-4.1-dev libgtk-3-dev patchelf
+          sudo apt install -y \
+            jq \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            patchelf
 
       - uses: actions/setup-node@v4
         with:
@@ -46,10 +53,14 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - run: cargo install tauri-cli
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli
 
-      - run: npm run build
-      - run: npm run tauri build
+      - name: Build frontend
+        run: npm run build
+
+      - name: Build Tauri app (Linux)
+        run: npm run tauri build
 
       - uses: actions/upload-artifact@v4
         with:
@@ -58,6 +69,7 @@ jobs:
 
   build-windows:
     runs-on: windows-latest
+
     steps:
       - uses: actions/checkout@v4
 
@@ -91,9 +103,14 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
-      - run: cargo install tauri-cli
-      - run: npm run build
-      - run: npm run tauri build -- --target x86_64-pc-windows-msvc
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Build Tauri app (Windows)
+        run: npm run tauri build -- --target x86_64-pc-windows-msvc
 
       - uses: actions/upload-artifact@v4
         with:
@@ -103,6 +120,7 @@ jobs:
   upload-updates:
     runs-on: ubuntu-latest
     needs: [build-linux, build-windows]
+
     steps:
       - uses: actions/checkout@v4
 
@@ -131,6 +149,6 @@ jobs:
       - name: Upload updates
         run: node scripts/upload-update.js
         env:
+          APP_VERSION: ${{ steps.extract_version.outputs.version }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          APP_VERSION: ${{ steps.extract_version.outputs.version }}
