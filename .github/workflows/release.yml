@@ -24,17 +24,19 @@ jobs:
           echo "Version: ${VERSION}"
 
       - name: Update Tauri version files
+        shell: pwsh
         run: |
-          VERSION="${{ steps.extract_version.outputs.version }}"
+          $version = "${{ steps.extract_version.outputs.version }}"
           cd src-tauri
 
-          jq --arg v "$VERSION" '.version = $v' tauri.conf.json > tmp.json
-          mv tmp.json tauri.conf.json
+          $json = Get-Content tauri.conf.json -Raw | ConvertFrom-Json
+          $json.version = $version
+          $json | ConvertTo-Json -Depth 10 | Set-Content tauri.conf.json
 
-          sed -i 's/^version = ".*"/version = "'"$VERSION"'"/' Cargo.toml
+          $content = Get-Content Cargo.toml
+          $content -replace '^version = ".*"', "version = `"$version`"" | Set-Content Cargo.toml
 
-          grep '"version"' tauri.conf.json
-          grep '^version =' Cargo.toml
+          Select-String -Path Cargo.toml -Pattern '^version ='
 
       - name: Install Linux dependencies
         run: |
