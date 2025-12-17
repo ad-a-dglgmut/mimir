@@ -68,6 +68,30 @@ jobs:
           ./create-venvs.sh
           cd ../../..
 
+      # CRITICAL: Copy Python files to the correct location for bundling
+      - name: Prepare Python for bundling
+        run: |
+          # Check what we have in python directory
+          echo "=== Python directory contents ==="
+          ls -la src-tauri/python/
+          echo ""
+          echo "=== Virtual environment contents ==="
+          ls -la src-tauri/python/linux-venv/ || echo "No linux-venv yet"
+          
+          # Clean up any old python directories in src-tauri root
+          rm -rf src-tauri/python-root
+          
+          # Copy the python directory to src-tauri root (where tauri.conf.json is)
+          cp -r src-tauri/python src-tauri/python-root
+          
+          # Update tauri.conf.json to point to the correct location
+          cd src-tauri
+          jq '.bundle.resources = ["python-root/**/*"]' tauri.conf.json > tmp.json && mv tmp.json tauri.conf.json
+          cd ..
+          
+          echo "=== Updated tauri.conf.json resources ==="
+          grep -A5 -B5 "resources" src-tauri/tauri.conf.json
+
       - name: Install Tauri CLI
         run: cargo install tauri-cli
 
@@ -137,6 +161,27 @@ jobs:
             powershell -ExecutionPolicy Bypass -File create-venvs.ps1
           }
           cd ..\..
+
+      # CRITICAL: Copy Python files to the correct location for bundling
+      - name: Prepare Python for bundling (Windows)
+        shell: pwsh
+        run: |
+          Write-Host "=== Python directory contents ===" -ForegroundColor Cyan
+          Get-ChildItem -Recurse "src-tauri\python" | Select-Object -First 20
+          
+          # Clean up any old python directories
+          Remove-Item -Recurse -Force -Path "src-tauri\python-root" -ErrorAction SilentlyContinue
+          
+          # Copy the python directory to src-tauri root (where tauri.conf.json is)
+          Copy-Item -Recurse -Path "src-tauri\python" -Destination "src-tauri\python-root"
+          
+          # Update tauri.conf.json to point to the correct location
+          $tauriConf = Get-Content "src-tauri\tauri.conf.json" -Raw | ConvertFrom-Json
+          $tauriConf.bundle.resources = @("python-root/**/*")
+          $tauriConf | ConvertTo-Json -Depth 10 | Set-Content "src-tauri\tauri.conf.json"
+          
+          Write-Host "=== Updated tauri.conf.json resources ===" -ForegroundColor Cyan
+          (Get-Content "src-tauri\tauri.conf.json" | Select-String -Pattern "resources" -Context 5).Context.PreContext + "resources" + (Get-Content "src-tauri\tauri.conf.json" | Select-String -Pattern "resources" -Context 5).Context.PostContext
 
       - name: Install Tauri CLI
         run: cargo install tauri-cli

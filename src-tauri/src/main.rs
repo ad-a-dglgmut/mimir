@@ -624,92 +624,102 @@ async fn analyze_query(
     Ok(response)
 }
 
-// ========== UPDATED PYTHON PATH DETECTION ==========
 
 fn get_python_paths(app_handle: &AppHandle) -> Result<(String, String), String> {
+    
     let resource_dir = app_handle
         .path()
         .resource_dir()
         .map_err(|e| format!("Failed to get resource directory: {}", e))?;
-
-    let python_dir = resource_dir.join("python");
-
-
-    let is_production = !cfg!(debug_assertions);
     
+    
+    let possible_python_dirs = vec![
+        resource_dir.join("python-root"),  // Bundled location
+        resource_dir.join("python"),       // Alternative location
+        std::env::current_dir().unwrap().join("python-root"), // Development
+        std::env::current_dir().unwrap().join("python"),      // Development
+    ];
+    
+    let mut python_dir = None;
+    for dir in possible_python_dirs {
+        println!("Checking: {:?}", dir);
+        if dir.exists() {
+            println!("Found Python directory at: {:?}", dir);
+            python_dir = Some(dir);
+            break;
+        }
+    }
+    
+    let python_dir = python_dir.ok_or("Could not find Python directory in bundled resources")?;
+    
+    println!("Using Python directory: {:?}", python_dir);
+    
+    // Get OS-specific venv directory
     let venv_dir = if cfg!(target_os = "windows") {
-        let windows_venv = python_dir.join("windows-venv");
-        println!("Windows venv path: {:?}", windows_venv);
-        println!("Windows venv exists: {:?}", windows_venv.exists());
-        windows_venv
+        python_dir.join("windows-venv")
     } else if cfg!(target_os = "linux") {
-        python_dir.join("src-tauri/resources/python/linux-venv")
+        python_dir.join("linux-venv")
     } else if cfg!(target_os = "macos") {
         python_dir.join("macos-venv")
     } else {
-        return Err(format!("Unsupported operating system: {}", std::env::consts::OS));
+        return Err(format!("Unsupported OS: {}", std::env::consts::OS));
     };
-
-    println!("Venv dir: {:?}", venv_dir);
-    println!("Venv dir exists: {:?}", venv_dir.exists());
-
+    
+    println!("Venv directory: {:?}", venv_dir);
+    
+    // Get Python executable
     let python_bin = if cfg!(target_os = "windows") {
-        let python_exe = venv_dir.join("Scripts").join("python.exe");
-        println!("Python exe path: {:?}", python_exe);
-        println!("Python exe exists: {:?}", python_exe.exists());
-        python_exe
+        venv_dir.join("Scripts").join("python.exe")
     } else {
         venv_dir.join("bin").join("python")
     };
-
+    
+    println!("Python binary: {:?}", python_bin);
+    
+    // Get analyzer script
     let analyzer_path = python_dir.join("analyzer.py");
     println!("Analyzer path: {:?}", analyzer_path);
-    println!("Analyzer exists: {:?}", analyzer_path.exists());
-
-    // If in production and the venv doesn't exist, try to locate it relative to the executable
-    if is_production && !python_bin.exists() {
-        println!("Production mode: Trying alternate paths...");
-        
-        // Try to get the path relative to the executable
-        if let Ok(exe_path) = std::env::current_exe() {
-            if let Some(exe_dir) = exe_path.parent() {
-                // For installed app, try paths relative to executable
-                let possible_paths = vec![
-                    exe_dir.join("python").join("windows-venv").join("Scripts").join("python.exe"),
-                    exe_dir.parent().map(|p| p.join("python").join("windows-venv").join("Scripts").join("python.exe")).unwrap_or_default(),
-                    exe_dir.join("..").join("python").join("windows-venv").join("Scripts").join("python.exe").canonicalize().unwrap_or_default(),
-                ];
-                
-                for path in possible_paths {
-                    println!("Checking alternate path: {:?}", path);
-                    if path.exists() {
-                        println!("Found Python at alternate path: {:?}", path);
-                        return Ok((path.to_string_lossy().to_string(), 
-                                analyzer_path.to_string_lossy().to_string()));
-                    }
-                }
+    
+    // Verify paths exist
+    if !python_bin.exists() {
+        println!("ERROR: Python binary not found!");
+        println!("Directory contents:");
+        if let Ok(entries) = std::fs::read_dir(&python_dir) {
+            for entry in entries.flatten() {
+                println!("  {:?}", entry.path());
             }
         }
+        return Err(format!("Python binary not found at: {:?}", python_bin));
     }
-
-    Ok((python_bin.to_string_lossy().to_string(), 
-        analyzer_path.to_string_lossy().to_string()))
-}
-
-fn get_python_analyzer_path(app_handle: &AppHandle) -> Result<String, String> {
-    let resource_dir = app_handle
-        .path()
-        .resource_dir()
-        .map_err(|e| format!("Failed to get resource directory: {}", e))?;
-
-    let python_dir = resource_dir.join("python");
-    let analyzer_path = python_dir.join("analyzer.py");
-
+    
     if !analyzer_path.exists() {
         return Err(format!("Analyzer script not found at: {:?}", analyzer_path));
     }
-
-    Ok(analyzer_path.to_string_lossy().to_string())
+    
+    println!("Testing Python...");
+    match std::process::Command::new(&python_bin)
+        .arg("-c")
+        .arg("import sys; print(f'Python {sys.version} OK'); import pandas; print('Pandas OK')")
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            println!("Python test successful: {}", stdout.trim());
+            Ok((
+                python_bin.to_string_lossy().to_string(),
+                analyzer_path.to_string_lossy().to_string()
+            ))
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            println!("Python test failed: {}", stderr);
+            Err(format!("Python test failed: {}", stderr))
+        }
+        Err(e) => {
+            println!("Failed to run Python: {}", e);
+            Err(format!("Failed to run Python: {}", e))
+        }
+    }
 }
 
 fn parse_python_output(stdout_raw: &str, stderr_raw: &str) -> AnalysisResponse {
