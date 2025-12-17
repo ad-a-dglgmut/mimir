@@ -634,68 +634,61 @@ fn get_python_paths(app_handle: &AppHandle) -> Result<(String, String), String> 
 
     let python_dir = resource_dir.join("python");
 
-    println!("=== Python Environment ===");
-    println!("Current OS: {}", std::env::consts::OS);
-    println!("Current architecture: {}", std::env::consts::ARCH);
 
-    let venv_dir = match std::env::consts::OS {
-        "windows" => python_dir.join("windows-venv"),
-        "linux" => python_dir.join("linux-venv"),
-        "macos" => {
-            let venv_path = python_dir.join("macos-venv");
-            
-            // On macOS, always use the wrapper if it exists
-            let wrapper = venv_path.join("bin/python_wrapper");
-            let python_bin = if wrapper.exists() {
-                println!("Using macOS wrapper script");
-                wrapper
-            } else {
-                // Fallback to regular python
-                venv_path.join("bin/python")
-            };
-            
-            python_bin
-        }
-        other => return Err(format!("Unsupported operating system: {}", other)),
+    let is_production = !cfg!(debug_assertions);
+    
+    let venv_dir = if cfg!(target_os = "windows") {
+        let windows_venv = python_dir.join("windows-venv");
+        println!("Windows venv path: {:?}", windows_venv);
+        println!("Windows venv exists: {:?}", windows_venv.exists());
+        windows_venv
+    } else if cfg!(target_os = "linux") {
+        python_dir.join("src-tauri/resources/python/linux-venv")
+    } else if cfg!(target_os = "macos") {
+        python_dir.join("macos-venv")
+    } else {
+        return Err(format!("Unsupported operating system: {}", std::env::consts::OS));
     };
 
+    println!("Venv dir: {:?}", venv_dir);
+    println!("Venv dir exists: {:?}", venv_dir.exists());
+
     let python_bin = if cfg!(target_os = "windows") {
-        venv_dir.join("Scripts/python.exe")
+        let python_exe = venv_dir.join("Scripts").join("python.exe");
+        println!("Python exe path: {:?}", python_exe);
+        println!("Python exe exists: {:?}", python_exe.exists());
+        python_exe
     } else {
-        venv_dir.join("bin/python")
+        venv_dir.join("bin").join("python")
     };
 
     let analyzer_path = python_dir.join("analyzer.py");
+    println!("Analyzer path: {:?}", analyzer_path);
+    println!("Analyzer exists: {:?}", analyzer_path.exists());
 
-    if !python_bin.exists() {
-        return Err(format!("Python binary not found at: {:?}", python_bin));
-    }
-
-    // Test the Python binary
-    println!("Testing Python at: {:?}", python_bin);
-    let test_output = std::process::Command::new(&python_bin)
-        .arg("-c")
-        .arg("import sys; print(f'Python {sys.version} OK'); import pandas; print('Pandas OK')")
-        .output();
+    // If in production and the venv doesn't exist, try to locate it relative to the executable
+    if is_production && !python_bin.exists() {
+        println!("Production mode: Trying alternate paths...");
         
-    match test_output {
-        Ok(output) if output.status.success() => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            println!("✓ Python test successful: {}", stdout.trim());
-        }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            println!("⚠ Python test issues: {}", stderr);
-            
-            // On macOS, we have one more fallback
-            if cfg!(target_os = "macos") {
-                println!("Falling back to system Python...");
-                return Ok(("python3".to_string(), analyzer_path.to_string_lossy().to_string()));
+        // Try to get the path relative to the executable
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                // For installed app, try paths relative to executable
+                let possible_paths = vec![
+                    exe_dir.join("python").join("windows-venv").join("Scripts").join("python.exe"),
+                    exe_dir.parent().map(|p| p.join("python").join("windows-venv").join("Scripts").join("python.exe")).unwrap_or_default(),
+                    exe_dir.join("..").join("python").join("windows-venv").join("Scripts").join("python.exe").canonicalize().unwrap_or_default(),
+                ];
+                
+                for path in possible_paths {
+                    println!("Checking alternate path: {:?}", path);
+                    if path.exists() {
+                        println!("Found Python at alternate path: {:?}", path);
+                        return Ok((path.to_string_lossy().to_string(), 
+                                analyzer_path.to_string_lossy().to_string()));
+                    }
+                }
             }
-        }
-        Err(e) => {
-            println!("✗ Failed to run Python: {}", e);
-            return Err(format!("Failed to run Python: {}", e));
         }
     }
 
@@ -1211,7 +1204,21 @@ async fn load_csv_info(
         Ok(result)
     } else if ext == "xlsx" || ext == "xls" {
         // Use Python to read Excel files (more reliable than calamine for all Excel features)
-        let output = Command::new("python")
+        // Helper function to create command with no window on Windows
+        fn create_no_window_command(program: &str) -> Command {
+            let mut command = Command::new(program);
+            
+            #[cfg(target_os = "windows")]
+            {
+                use std::os::windows::process::CommandExt;
+                const CREATE_NO_WINDOW: u32 = 0x08000000;
+                command.creation_flags(CREATE_NO_WINDOW);
+            }
+            
+            command
+        }
+
+        let output = create_no_window_command("python")
             .arg("-c")
             .arg(format!(
                 r#"
@@ -1237,7 +1244,7 @@ except Exception as e:
             .output()
             .or_else(|_| {
                 // Fallback to python3 if python doesn't work
-                Command::new("python3")
+                create_no_window_command("python3")
                     .arg("-c")
                     .arg(format!(
                         r#"
@@ -1327,12 +1334,29 @@ except Exception as e:
         output_path.to_string_lossy()
     );
 
-    let output = Command::new("python")
+    // Helper function to create command with no window on Windows
+    fn create_no_window_command(program: &str) -> Command {
+        let mut command = Command::new(program);
+        
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        
+        command.env("PYTHONUTF8", "1");
+        command.env("PYTHONIOENCODING", "utf-8");
+        
+        command
+    }
+
+    let output = create_no_window_command("python")
         .arg("-c")
         .arg(&python_code)
         .output()
         .or_else(|_| {
-            Command::new("python3")
+            create_no_window_command("python3")
                 .arg("-c")
                 .arg(&python_code)
                 .output()
@@ -1467,6 +1491,24 @@ except Exception as e:
     println!("{}", python_code);
     println!("=========================");
 
+    // Helper function to create command with no window on Windows
+    fn create_no_window_command(program: &str) -> Command {
+        let mut command = Command::new(program);
+        
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        
+        // Add environment variables for consistent encoding
+        command.env("PYTHONUTF8", "1");
+        command.env("PYTHONIOENCODING", "utf-8");
+        
+        command
+    }
+
     // Try to use the embedded Python first
     let python_bin = get_python_paths(&app_handle)
         .map(|(python_bin, _)| python_bin)
@@ -1475,53 +1517,27 @@ except Exception as e:
             "python".to_string()
         });
 
-    let mut command = Command::new(&python_bin);
+    let mut command = create_no_window_command(&python_bin);
     command.arg("-c");
     command.arg(&python_code);
-    
-    // Add environment variables
-    command.env("PYTHONUTF8", "1");
-    command.env("PYTHONIOENCODING", "utf-8");
-    
-    // On Windows, suppress the console window
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
 
     let output = match command.output() {
         Ok(output) => output,
         Err(e) => {
             println!("Embedded Python failed: {}, trying system python", e);
             
-            // Try with system python
-            let mut sys_command = Command::new("python");
+            // Try with system python with no window flag
+            let mut sys_command = create_no_window_command("python");
             sys_command.arg("-c");
             sys_command.arg(&python_code);
-            
-            #[cfg(target_os = "windows")]
-            {
-                use std::os::windows::process::CommandExt;
-                const CREATE_NO_WINDOW: u32 = 0x08000000;
-                sys_command.creation_flags(CREATE_NO_WINDOW);
-            }
             
             match sys_command.output() {
                 Ok(output) => output,
                 Err(_) => {
-                    // Try python3 as last resort
-                    let mut py3_command = Command::new("python3");
+                    // Try python3 as last resort with no window flag
+                    let mut py3_command = create_no_window_command("python3");
                     py3_command.arg("-c");
                     py3_command.arg(&python_code);
-                    
-                    #[cfg(target_os = "windows")]
-                    {
-                        use std::os::windows::process::CommandExt;
-                        const CREATE_NO_WINDOW: u32 = 0x08000000;
-                        py3_command.creation_flags(CREATE_NO_WINDOW);
-                    }
                     
                     py3_command.output()
                         .map_err(|e| format!("All Python attempts failed: {}", e))?
