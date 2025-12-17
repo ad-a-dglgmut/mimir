@@ -467,10 +467,8 @@ async fn start_python_service(
         return Ok("Python service already running".to_string());
     }
 
-    let analyzer_path = get_python_analyzer_path(&app_handle)
-        .map_err(|e| format!("Failed to get Python analyzer path: {}", e))?;
-
-    let (python_bin, _) = get_python_paths(&app_handle)
+    // Get both python binary and analyzer path
+    let (python_bin, analyzer_path) = get_python_paths(&app_handle)
         .map_err(|e| format!("Failed to get Python paths: {}", e))?;
 
     let mut command = Command::new(&python_bin);
