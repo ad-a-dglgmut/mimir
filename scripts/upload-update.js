@@ -8,20 +8,23 @@ if (!version) {
 }
 
 const bucket = "mimir-updates";
+const region = "eu-north-1";
+
+/**
+ * This MUST match actions/download-artifact output
+ */
+const platformDirs = {
+  linux: "artifacts/linux-build",
+  windows: "artifacts/windows-build",
+};
 
 const s3 = new S3Client({
-  region: "eu-north-1",
+  region,
   credentials: {
     accessKeyId: process.env.AWS_ACCESS_KEY_ID,
     secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
   },
 });
-
-const platformDirs = {
-  linux: "./dist/linux",
-  windows: "./dist/windows",
-  macos: "./dist/macos",
-};
 
 function findFiles(dir) {
   if (!fs.existsSync(dir)) return [];
@@ -34,11 +37,11 @@ function findFiles(dir) {
 function detectPlatform(file) {
   if (file.endsWith(".AppImage")) return "linux-x86_64";
   if (file.endsWith(".msi")) return "windows-x86_64";
-  if (file.endsWith(".app.tar.gz")) return "darwin-x86_64";
   return null;
 }
 
 async function upload(file, key) {
+  console.log("Uploading:", key);
   await s3.send(
     new PutObjectCommand({
       Bucket: bucket,
@@ -56,52 +59,65 @@ async function main() {
     platforms: {},
   };
 
-  for (const [name, dir] of Object.entries(platformDirs)) {
-    if (!fs.existsSync(dir)) continue;
+  for (const [platformName, dir] of Object.entries(platformDirs)) {
+    if (!fs.existsSync(dir)) {
+      console.warn("Missing directory:", dir);
+      continue;
+    }
+
+    console.log("Scanning:", dir);
 
     const files = findFiles(dir).filter(
-      f =>
-        f.endsWith(".AppImage") ||
-        f.endsWith(".msi") ||
-        f.endsWith(".app.tar.gz")
+      f => f.endsWith(".AppImage") || f.endsWith(".msi")
     );
 
     for (const file of files) {
       const sig = `${file}.sig`;
-      if (!fs.existsSync(sig)) continue;
+
+      if (!fs.existsSync(sig)) {
+        console.warn("Missing signature for:", file);
+        continue;
+      }
 
       const platform = detectPlatform(file);
       if (!platform) continue;
 
-      const key = `releases/${version}/${name}/${path.basename(file)}`;
+      const key = `releases/${version}/${platformName}/${path.basename(file)}`;
       const sigKey = `${key}.sig`;
 
       await upload(file, key);
       await upload(sig, sigKey);
 
       latest.platforms[platform] = {
-        url: `https://${bucket}.s3.eu-north-1.amazonaws.com/${key}`,
+        url: `https://${bucket}.s3.${region}.amazonaws.com/${key}`,
         signature: fs.readFileSync(sig, "utf8").trim(),
       };
     }
   }
 
-  fs.writeFileSync("latest.json", JSON.stringify(latest, null, 2));
+  if (Object.keys(latest.platforms).length === 0) {
+    throw new Error("No platforms uploaded — check artifact paths and signatures");
+  }
+
+  const json = JSON.stringify(latest, null, 2);
+
+  fs.writeFileSync("latest.json", json);
 
   await s3.send(
     new PutObjectCommand({
       Bucket: bucket,
       Key: "updates/latest.json",
-      Body: JSON.stringify(latest, null, 2),
+      Body: json,
       ContentType: "application/json",
     })
   );
 
-  console.log("latest.json published");
-  console.log("version:", version);
+  console.log("✅ latest.json published");
+  console.log("Version:", version);
 }
 
 main().catch(err => {
+  console.error("❌ Release failed");
   console.error(err);
   process.exit(1);
 });
