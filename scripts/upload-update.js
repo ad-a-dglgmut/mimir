@@ -3,105 +3,96 @@ import fs from "fs";
 import path from "path";
 
 const version = process.env.APP_VERSION;
-if (!version) {
-  throw new Error("APP_VERSION is not set");
-}
+if (!version) throw new Error("APP_VERSION is not set");
 
 const bucket = "mimir-updates";
-
 const s3 = new S3Client({
-  region: "eu-north-1",
-  credentials: {
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-  },
+    region: "eu-north-1",
+    credentials: {
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+    },
 });
 
+// Artifacts are downloaded into these subfolders by the workflow
 const platformDirs = {
-  linux: "./dist/linux",
-  windows: "./dist/windows",
-  macos: "./dist/macos",
+    linux: "./artifacts/linux-build",
+    windows: "./artifacts/windows-build"
 };
 
-function findFiles(dir) {
-  if (!fs.existsSync(dir)) return [];
-  return fs
-    .readdirSync(dir, { recursive: true })
-    .map(f => path.join(dir, f))
-    .filter(f => fs.statSync(f).isFile());
-}
-
 function detectPlatform(file) {
-  if (file.endsWith(".AppImage")) return "linux-x86_64";
-  if (file.endsWith(".msi")) return "windows-x86_64";
-  if (file.endsWith(".app.tar.gz")) return "darwin-x86_64";
-  return null;
+    // Tauri v2 Updater Targets
+    if (file.endsWith(".AppImage.tar.gz")) return "linux-x86_64";
+    if (file.endsWith(".msi.zip")) return "windows-x86_64";
+    if (file.endsWith(".nsis.zip")) return "windows-x86_64";
+    return null;
 }
 
-async function upload(file, key) {
-  await s3.send(
-    new PutObjectCommand({
-      Bucket: bucket,
-      Key: key,
-      Body: fs.readFileSync(file),
-    })
-  );
+async function upload(file, key, contentType = "application/octet-stream") {
+    console.log(`Uploading: ${file} -> ${key}`);
+    await s3.send(new PutObjectCommand({
+        Bucket: bucket,
+        Key: key,
+        Body: fs.readFileSync(file),
+        ContentType: contentType
+    }));
 }
 
 async function main() {
-  const latest = {
-    version,
-    notes: `Release ${version}`,
-    pub_date: new Date().toISOString(),
-    platforms: {},
-  };
+    const latest = {
+        version,
+        notes: `Release ${version}`,
+        pub_date: new Date().toISOString(),
+        platforms: {},
+    };
 
-  for (const [name, dir] of Object.entries(platformDirs)) {
-    if (!fs.existsSync(dir)) continue;
+    for (const [name, dir] of Object.entries(platformDirs)) {
+        if (!fs.existsSync(dir)) {
+            console.log(`Directory ${dir} not found, skipping...`);
+            continue;
+        }
 
-    const files = findFiles(dir).filter(
-      f =>
-        f.endsWith(".AppImage") ||
-        f.endsWith(".msi") ||
-        f.endsWith(".app.tar.gz")
-    );
+        // Recursively find all files in the artifact directory
+        const allFiles = fs.readdirSync(dir, { recursive: true })
+            .map(f => path.join(dir, f))
+            .filter(f => fs.statSync(f).isFile());
 
-    for (const file of files) {
-      const sig = `${file}.sig`;
-      if (!fs.existsSync(sig)) continue;
+        for (const file of allFiles) {
+            const platform = detectPlatform(file);
+            const sigFile = `${file}.sig`;
 
-      const platform = detectPlatform(file);
-      if (!platform) continue;
+            // We only care about files that have a corresponding .sig file
+            if (platform && fs.existsSync(sigFile)) {
+                const fileName = path.basename(file);
+                const key = `releases/${version}/${platform}/${fileName}`;
+                const sigKey = `${key}.sig`;
 
-      const key = `releases/${version}/${name}/${path.basename(file)}`;
-      const sigKey = `${key}.sig`;
+                await upload(file, key);
+                await upload(sigFile, sigKey, "text/plain");
 
-      await upload(file, key);
-      await upload(sig, sigKey);
-
-      latest.platforms[platform] = {
-        url: `https://${bucket}.s3.eu-north-1.amazonaws.com/${key}`,
-        signature: fs.readFileSync(sig, "utf8").trim(),
-      };
+                latest.platforms[platform] = {
+                    url: `https://${bucket}.s3.eu-north-1.amazonaws.com/${key}`,
+                    signature: fs.readFileSync(sigFile, "utf8").trim(),
+                };
+                console.log(`Added platform: ${platform}`);
+            }
+        }
     }
-  }
 
-  fs.writeFileSync("latest.json", JSON.stringify(latest, null, 2));
+    const latestJson = JSON.stringify(latest, null, 2);
+    console.log("Generated latest.json:", latestJson);
 
-  await s3.send(
-    new PutObjectCommand({
-      Bucket: bucket,
-      Key: "updates/latest.json",
-      Body: JSON.stringify(latest, null, 2),
-      ContentType: "application/json",
-    })
-  );
+    await s3.send(new PutObjectCommand({
+        Bucket: bucket,
+        Key: "updates/latest.json",
+        Body: latestJson,
+        ContentType: "application/json",
+    }));
 
-  console.log("latest.json published");
-  console.log("version:", version);
+    console.log("Successfully published latest.json to S3");
 }
 
 main().catch(err => {
-  console.error(err);
-  process.exit(1);
+    console.error(err);
+    process.exit(1);
 });
