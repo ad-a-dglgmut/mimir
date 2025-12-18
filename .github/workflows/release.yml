@@ -16,22 +16,6 @@ jobs:
         run: |
           VERSION="${GITHUB_REF#refs/tags/v}"
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
-          echo "Building version: ${VERSION}"
-
-      - name: Update Tauri version (tauri.conf.json + Cargo.toml)
-        run: |
-          VERSION="${{ steps.extract_version.outputs.version }}"
-          cd src-tauri
-
-          jq --arg version "$VERSION" '.version = $version' tauri.conf.json > tmp.json
-          mv tmp.json tauri.conf.json
-
-          sed -i 's/^version = ".*"/version = "'"$VERSION"'"/' Cargo.toml
-
-          grep '"version"' tauri.conf.json
-          grep '^version =' Cargo.toml
-
-          cd ..
 
       - name: Install Linux dependencies
         run: |
@@ -61,31 +45,26 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Generate Python Virtual Environments
+      - name: Build Python Environment (Linux)
         run: |
-          cd src-tauri/python
-          chmod +x create-venvs.sh
-          ./create-venvs.sh
-          cd ../../..
-
-      # CRITICAL: Copy Python files to the correct location for bundling
-      - name: Prepare Python for bundling (Linux)
-        run: |
+          # Execute the script from project root
           chmod +x src-tauri/python/create-venvs.sh
           ./src-tauri/python/create-venvs.sh
           
-          # Update tauri.conf.json to include the 'python' folder
+          # Update tauri.conf.json to bundle the 'python' folder and set version
           cd src-tauri
-          jq '.bundle.resources = ["python/**/*"]' tauri.conf.json > tmp.json && mv tmp.json tauri.conf.json
-
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli
+          VERSION="${{ steps.extract_version.outputs.version }}"
+          jq --arg ver "$VERSION" '.version = $ver | .bundle.resources = ["python/**/*"]' tauri.conf.json > tmp.json && mv tmp.json tauri.conf.json
+          
+          # Update Cargo.toml version
+          sed -i 's/^version = ".*"/version = "'"$VERSION"'"/' Cargo.toml
+          cd ..
 
       - name: Build frontend
         run: npm run build
 
       - name: Build Tauri app (Linux)
-        run: npm run tauri build
+        run: npx tauri build
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           APP_VERSION: ${{ steps.extract_version.outputs.version }}
@@ -96,7 +75,7 @@ jobs:
           name: linux-build
           path: src-tauri/target/release/bundle/
 
-build-windows:
+  build-windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -110,7 +89,10 @@ build-windows:
       - name: Setup Node and Rust
         uses: actions/setup-node@v4
         with: { node-version: 20 }
+        
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
 
       - name: Install JS dependencies
         run: npm install
@@ -118,25 +100,36 @@ build-windows:
       - name: Setup Windows Python (Embeddable)
         shell: pwsh
         run: |
+          # Navigate into the folder so the PS1 creates 'windows-python' inside it
           cd src-tauri/python
           ./create-windows-python.ps1
           cd ../..
 
-      - name: Prepare Python for bundling (Windows)
+      - name: Prepare Windows Bundle Configuration
         shell: pwsh
         run: |
-          # Ensure tauri.conf.json is updated to bundle the 'python' folder
-          $tauriConf = Get-Content "src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json
-          $tauriConf.bundle.resources = @("python/**/*")
-          $tauriConf.version = "${{ steps.extract_version.outputs.version }}"
-          $tauriConf | ConvertTo-Json -Depth 10 | Set-Content "src-tauri/tauri.conf.json"
+          $version = "${{ steps.extract_version.outputs.version }}"
+          cd src-tauri
           
-          Write-Host "=== Bundle configuration updated ===" -ForegroundColor Green
+          # Update tauri.conf.json: bundle the 'python' folder and sync version
+          $json = Get-Content tauri.conf.json -Raw | ConvertFrom-Json
+          $json.bundle.resources = @("python/**/*")
+          $json.version = $version
+          $json | ConvertTo-Json -Depth 10 | Set-Content tauri.conf.json
+          
+          # Sync Cargo.toml version
+          $content = Get-Content Cargo.toml
+          $content -replace '^version = ".*"', "version = `"$version`"" | Set-Content Cargo.toml
+          cd ..
 
-      - name: Build Tauri App
-        run: npm run tauri build -- --target x86_64-pc-windows-msvc
+      - name: Build frontend
+        run: npm run build
+
+      - name: Build Tauri App (Windows)
+        run: npx tauri build --target x86_64-pc-windows-msvc
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          APP_VERSION: ${{ steps.extract_version.outputs.version }}
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
@@ -146,44 +139,34 @@ build-windows:
 
   upload-updates:
     runs-on: ubuntu-latest
-    needs:
-      - build-linux
-      - build-windows
-
+    needs: [build-linux, build-windows]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Extract version from tag
+      - name: Extract version
         id: extract_version
         run: |
           VERSION="${GITHUB_REF#refs/tags/v}"
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
-          echo "Uploading latest.json for version ${VERSION}"
 
-      - name: Download Linux artifacts
+      - name: Download Artifacts
         uses: actions/download-artifact@v4
         with:
-          name: linux-build
-          path: dist/linux
-
-      - name: Download Windows artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: windows-build
-          path: dist/windows
+          path: dist-artifacts
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
-        with:
-          node-version: 20
+        with: { node-version: 20 }
 
       - name: Install uploader dependencies
         run: npm install @aws-sdk/client-s3
 
-      - name: Upload latest.json and artifacts
+      - name: Upload to S3
         run: node scripts/upload-update.js
         env:
           GITHUB_REF: ${{ github.ref }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           APP_VERSION: ${{ steps.extract_version.outputs.version }}
+          # Path to where artifacts were downloaded
+          ARTIFACT_PATH: dist-artifacts
