@@ -41,7 +41,7 @@ jobs:
           path: src-tauri/target/release/bundle/appimage/
 
   build-windows:
-    runs-runs: windows-latest
+    runs-on: windows-latest # <-- Corrected from runs-runs
     steps:
       - uses: actions/checkout@v4
       - name: Extract version
