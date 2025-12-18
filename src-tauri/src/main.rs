@@ -624,100 +624,35 @@ async fn analyze_query(
 
 
 fn get_python_paths(app_handle: &AppHandle) -> Result<(String, String), String> {
-    
-    let resource_dir = app_handle
-        .path()
-        .resource_dir()
+    let resource_dir = app_handle.path().resource_dir()
         .map_err(|e| format!("Failed to get resource directory: {}", e))?;
     
+    let python_dir = resource_dir.join("python");
     
-    let possible_python_dirs = vec![
-        resource_dir.join("python-root"),  // Bundled location
-        resource_dir.join("python"),       // Alternative location
-        std::env::current_dir().unwrap().join("python-root"), // Development
-        std::env::current_dir().unwrap().join("python"),      // Development
-    ];
-    
-    let mut python_dir = None;
-    for dir in possible_python_dirs {
-        println!("Checking: {:?}", dir);
-        if dir.exists() {
-            println!("Found Python directory at: {:?}", dir);
-            python_dir = Some(dir);
-            break;
-        }
-    }
-    
-    let python_dir = python_dir.ok_or("Could not find Python directory in bundled resources")?;
-    
-    println!("Using Python directory: {:?}", python_dir);
-    
-    // Get OS-specific venv directory
-    let venv_dir = if cfg!(target_os = "windows") {
-        python_dir.join("windows-venv")
-    } else if cfg!(target_os = "linux") {
-        python_dir.join("linux-venv")
-    } else if cfg!(target_os = "macos") {
-        python_dir.join("macos-venv")
+    let (python_bin, analyzer_path) = if cfg!(target_os = "windows") {
+        (
+            python_dir.join("windows-python").join("python.exe"), 
+            python_dir.join("analyzer.py")
+        )
     } else {
-        return Err(format!("Unsupported OS: {}", std::env::consts::OS));
+        (
+            python_dir.join("linux-venv").join("bin").join("python"),
+            python_dir.join("analyzer.py")
+        )
     };
-    
-    println!("Venv directory: {:?}", venv_dir);
-    
-    // Get Python executable
-    let python_bin = if cfg!(target_os = "windows") {
-        venv_dir.join("Scripts").join("python.exe")
-    } else {
-        venv_dir.join("bin").join("python")
-    };
-    
-    println!("Python binary: {:?}", python_bin);
-    
-    // Get analyzer script
-    let analyzer_path = python_dir.join("analyzer.py");
-    println!("Analyzer path: {:?}", analyzer_path);
-    
-    // Verify paths exist
+
     if !python_bin.exists() {
-        println!("ERROR: Python binary not found!");
-        println!("Directory contents:");
-        if let Ok(entries) = std::fs::read_dir(&python_dir) {
-            for entry in entries.flatten() {
-                println!("  {:?}", entry.path());
-            }
-        }
         return Err(format!("Python binary not found at: {:?}", python_bin));
     }
     
     if !analyzer_path.exists() {
         return Err(format!("Analyzer script not found at: {:?}", analyzer_path));
     }
-    
-    println!("Testing Python...");
-    match std::process::Command::new(&python_bin)
-        .arg("-c")
-        .arg("import sys; print(f'Python {sys.version} OK'); import pandas; print('Pandas OK')")
-        .output()
-    {
-        Ok(output) if output.status.success() => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            println!("Python test successful: {}", stdout.trim());
-            Ok((
-                python_bin.to_string_lossy().to_string(),
-                analyzer_path.to_string_lossy().to_string()
-            ))
-        }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            println!("Python test failed: {}", stderr);
-            Err(format!("Python test failed: {}", stderr))
-        }
-        Err(e) => {
-            println!("Failed to run Python: {}", e);
-            Err(format!("Failed to run Python: {}", e))
-        }
-    }
+
+    Ok((
+        python_bin.to_string_lossy().to_string(),
+        analyzer_path.to_string_lossy().to_string()
+    ))
 }
 
 fn parse_python_output(stdout_raw: &str, stderr_raw: &str) -> AnalysisResponse {

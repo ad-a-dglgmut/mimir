@@ -69,28 +69,14 @@ jobs:
           cd ../../..
 
       # CRITICAL: Copy Python files to the correct location for bundling
-      - name: Prepare Python for bundling
+      - name: Prepare Python for bundling (Linux)
         run: |
-          # Check what we have in python directory
-          echo "=== Python directory contents ==="
-          ls -la src-tauri/python/
-          echo ""
-          echo "=== Virtual environment contents ==="
-          ls -la src-tauri/python/linux-venv/ || echo "No linux-venv yet"
+          chmod +x src-tauri/python/create-venvs.sh
+          ./src-tauri/python/create-venvs.sh
           
-          # Clean up any old python directories in src-tauri root
-          rm -rf src-tauri/python-root
-          
-          # Copy the python directory to src-tauri root (where tauri.conf.json is)
-          cp -r src-tauri/python src-tauri/python-root
-          
-          # Update tauri.conf.json to point to the correct location
+          # Update tauri.conf.json to include the 'python' folder
           cd src-tauri
-          jq '.bundle.resources = ["python-root/**/*"]' tauri.conf.json > tmp.json && mv tmp.json tauri.conf.json
-          cd ..
-          
-          echo "=== Updated tauri.conf.json resources ==="
-          grep -A5 -B5 "resources" src-tauri/tauri.conf.json
+          jq '.bundle.resources = ["python/**/*"]' tauri.conf.json > tmp.json && mv tmp.json tauri.conf.json
 
       - name: Install Tauri CLI
         run: cargo install tauri-cli
@@ -110,92 +96,49 @@ jobs:
           name: linux-build
           path: src-tauri/target/release/bundle/
 
-  build-windows:
+build-windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Extract version from tag
+      - name: Extract version
         id: extract_version
         run: |
           $version = "$env:GITHUB_REF" -replace 'refs/tags/v', ''
           echo "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
-      - name: Update Tauri version (tauri.conf.json + Cargo.toml)
-        shell: pwsh
-        run: |
-          $version = "${{ steps.extract_version.outputs.version }}"
-          cd src-tauri
-
-          $json = Get-Content tauri.conf.json -Raw | ConvertFrom-Json
-          $json.version = $version
-          $json | ConvertTo-Json -Depth 10 | Set-Content tauri.conf.json
-
-          $content = Get-Content Cargo.toml
-          $content -replace '^version = ".*"', "version = `"$version`"" | Set-Content Cargo.toml
-
-          Select-String -Path Cargo.toml -Pattern '^version ='
-
-      - name: Setup Node.js
+      - name: Setup Node and Rust
         uses: actions/setup-node@v4
-        with:
-          node-version: 20
+        with: { node-version: 20 }
+      - uses: dtolnay/rust-toolchain@stable
 
       - name: Install JS dependencies
         run: npm install
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
-
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-
-      - name: Generate Python Virtual Environments (Windows)
+      - name: Setup Windows Python (Embeddable)
+        shell: pwsh
         run: |
           cd src-tauri/python
-          if (Test-Path "create-venvs.ps1") {
-            powershell -ExecutionPolicy Bypass -File create-venvs.ps1
-          }
-          cd ..\..
+          ./create-windows-python.ps1
+          cd ../..
 
-      # CRITICAL: Copy Python files to the correct location for bundling
       - name: Prepare Python for bundling (Windows)
         shell: pwsh
         run: |
-          Write-Host "=== Python directory contents ===" -ForegroundColor Cyan
-          Get-ChildItem -Recurse "src-tauri\python" | Select-Object -First 20
+          # Ensure tauri.conf.json is updated to bundle the 'python' folder
+          $tauriConf = Get-Content "src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json
+          $tauriConf.bundle.resources = @("python/**/*")
+          $tauriConf.version = "${{ steps.extract_version.outputs.version }}"
+          $tauriConf | ConvertTo-Json -Depth 10 | Set-Content "src-tauri/tauri.conf.json"
           
-          # Clean up any old python directories
-          Remove-Item -Recurse -Force -Path "src-tauri\python-root" -ErrorAction SilentlyContinue
-          
-          # Copy the python directory to src-tauri root (where tauri.conf.json is)
-          Copy-Item -Recurse -Path "src-tauri\python" -Destination "src-tauri\python-root"
-          
-          # Update tauri.conf.json to point to the correct location
-          $tauriConf = Get-Content "src-tauri\tauri.conf.json" -Raw | ConvertFrom-Json
-          $tauriConf.bundle.resources = @("python-root/**/*")
-          $tauriConf | ConvertTo-Json -Depth 10 | Set-Content "src-tauri\tauri.conf.json"
-          
-          Write-Host "=== Updated tauri.conf.json resources ===" -ForegroundColor Cyan
-          (Get-Content "src-tauri\tauri.conf.json" | Select-String -Pattern "resources" -Context 5).Context.PreContext + "resources" + (Get-Content "src-tauri\tauri.conf.json" | Select-String -Pattern "resources" -Context 5).Context.PostContext
+          Write-Host "=== Bundle configuration updated ===" -ForegroundColor Green
 
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli
-
-      - name: Build frontend
-        run: npm run build
-
-      - name: Build Tauri app (Windows)
+      - name: Build Tauri App
         run: npm run tauri build -- --target x86_64-pc-windows-msvc
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          APP_VERSION: ${{ steps.extract_version.outputs.version }}
 
-      - name: Upload Windows artifacts
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: windows-build
