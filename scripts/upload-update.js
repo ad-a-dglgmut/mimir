@@ -10,14 +10,6 @@ if (!version) {
 const bucket = "mimir-updates";
 const region = "eu-north-1";
 
-/**
- * This MUST match actions/download-artifact output
- */
-const platformDirs = {
-  linux: "artifacts/linux-build",
-  windows: "artifacts/windows-build",
-};
-
 const s3 = new S3Client({
   region,
   credentials: {
@@ -25,6 +17,15 @@ const s3 = new S3Client({
     secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
   },
 });
+
+/**
+ * These MUST match actions/download-artifact output
+ */
+const platformDirs = {
+  linux: "artifacts/linux-build",
+  windows: "artifacts/windows-build",
+  // macos: "artifacts/macos-build", // enable when you build macOS
+};
 
 function findFiles(dir) {
   if (!fs.existsSync(dir)) return [];
@@ -37,6 +38,7 @@ function findFiles(dir) {
 function detectPlatform(file) {
   if (file.endsWith(".AppImage")) return "linux-x86_64";
   if (file.endsWith(".msi")) return "windows-x86_64";
+  if (file.endsWith(".app.tar.gz")) return "darwin-x86_64";
   return null;
 }
 
@@ -59,30 +61,30 @@ async function main() {
     platforms: {},
   };
 
-  for (const [platformName, dir] of Object.entries(platformDirs)) {
+  for (const [name, dir] of Object.entries(platformDirs)) {
     if (!fs.existsSync(dir)) {
-      console.warn("Missing directory:", dir);
+      console.warn("Skipping missing dir:", dir);
       continue;
     }
 
-    console.log("Scanning:", dir);
-
     const files = findFiles(dir).filter(
-      f => f.endsWith(".AppImage") || f.endsWith(".msi")
+      f =>
+        f.endsWith(".AppImage") ||
+        f.endsWith(".msi") ||
+        f.endsWith(".app.tar.gz")
     );
 
     for (const file of files) {
       const sig = `${file}.sig`;
-
       if (!fs.existsSync(sig)) {
-        console.warn("Missing signature for:", file);
+        console.warn("Missing signature:", sig);
         continue;
       }
 
       const platform = detectPlatform(file);
       if (!platform) continue;
 
-      const key = `releases/${version}/${platformName}/${path.basename(file)}`;
+      const key = `releases/${version}/${name}/${path.basename(file)}`;
       const sigKey = `${key}.sig`;
 
       await upload(file, key);
@@ -96,7 +98,7 @@ async function main() {
   }
 
   if (Object.keys(latest.platforms).length === 0) {
-    throw new Error("No platforms uploaded — check artifact paths and signatures");
+    throw new Error("No platforms found — artifacts not detected");
   }
 
   const json = JSON.stringify(latest, null, 2);
@@ -117,7 +119,7 @@ async function main() {
 }
 
 main().catch(err => {
-  console.error("❌ Release failed");
+  console.error("❌ Upload failed");
   console.error(err);
   process.exit(1);
 });
