@@ -80,9 +80,18 @@ jobs:
           Invoke-WebRequest -Uri $url -OutFile kms-cng.zip
           Expand-Archive -Path kms-cng.zip -DestinationPath ./kms_temp -Force
           
-          # This finds the script wherever it is and runs it
-          $script = Get-ChildItem -Path ./kms_temp -Filter "install_cng.ps1" -Recurse | Select-Object -ExpandProperty FullName
-          & $script -InstallPath "C:\kms-cng"
+          # Create destination directory first
+          New-Item -ItemType Directory -Force -Path "C:\kms-cng"
+
+          # Search specifically for the INSTALL script only
+          $script = Get-ChildItem -Path ./kms_temp -Filter "install_cng.ps1" -Recurse | Select-Object -First 1 -ExpandProperty FullName
+          
+          if ($script) {
+            Write-Host "Executing: $script"
+            & $script -InstallPath "C:\kms-cng"
+          } else {
+            throw "Installer script not found!"
+          }
           
           echo "C:\kms-cng" >> $env:GITHUB_PATH
 
@@ -101,6 +110,7 @@ jobs:
           $filesToSign = Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi", "src-tauri/target/x86_64-pc-windows-msvc/release/*.exe"
           
           foreach ($file in $filesToSign) {
+            Write-Host "Signing: $($file.FullName)"
             signtool sign /v /debug /fd sha256 /tr http://timestamp.sectigo.com /td sha256 /f $certPath /csp "Google Cloud KMS Provider" /kc "${{ secrets.GCP_KMS_KEY_PATH }}" $file.FullName
             signtool verify /v /pa $file.FullName
           }
