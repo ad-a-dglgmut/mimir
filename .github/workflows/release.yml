@@ -48,6 +48,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 1. Authenticate with Google Cloud
       - id: 'auth'
         uses: 'google-github-actions/auth@v2'
         with:
@@ -73,6 +74,7 @@ jobs:
           $tauriConf | ConvertTo-Json -Depth 10 | Set-Content "src-tauri/tauri.conf.json"
           (Get-Content src-tauri/Cargo.toml) -replace '^version = ".*"', 'version = "${{ steps.extract_version.outputs.version }}"' | Set-Content src-tauri/Cargo.toml
 
+      # 2. Install Cloud KMS CNG Provider via MSI (More stable than script)
       - name: Install Google Cloud KMS CNG Provider
         shell: pwsh
         run: |
@@ -80,29 +82,31 @@ jobs:
           Invoke-WebRequest -Uri $url -OutFile kms-cng.zip
           Expand-Archive -Path kms-cng.zip -DestinationPath ./kms_temp -Force
           
-          # Create destination directory first
-          New-Item -ItemType Directory -Force -Path "C:\kms-cng"
-
-          # Search specifically for the INSTALL script only
-          $script = Get-ChildItem -Path ./kms_temp -Filter "install_cng.ps1" -Recurse | Select-Object -First 1 -ExpandProperty FullName
-          
-          if ($script) {
-            Write-Host "Executing: $script"
-            & $script -InstallPath "C:\kms-cng"
+          $msi = Get-ChildItem -Path ./kms_temp -Filter "*.msi" -Recurse | Select-Object -First 1
+          if ($msi) {
+            Write-Host "Installing MSI: $($msi.FullName)"
+            Start-Process msiexec.exe -ArgumentList "/i `"$($msi.FullName)`" /qn /norestart" -Wait
           } else {
-            throw "Installer script not found!"
+            throw "MSI installer not found in ZIP!"
           }
           
-          echo "C:\kms-cng" >> $env:GITHUB_PATH
+          # Add the default installation path to the environment
+          $defaultPath = "C:\Program Files\Google\Cloud KMS CNG Provider"
+          if (Test-Path $defaultPath) {
+             echo $defaultPath >> $env:GITHUB_PATH
+          }
 
+      # 3. Build App (Tauri generates the unsigned MSI/EXE)
       - name: Build App
         run: npm install && npm run build && npx tauri build --target x86_64-pc-windows-msvc
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
 
+      # 4. Sign and Verify via Google HSM
       - name: Sign and Verify Windows Binaries
         shell: pwsh
         run: |
+          # Write public cert to file
           $certPath = "C:\sectigo_cert.crt"
           $certBytes = [System.Convert]::FromBase64String("${{ secrets.SECTIGO_CERT_BASE64 }}")
           [System.IO.File]::WriteAllBytes($certPath, $certBytes)
@@ -110,9 +114,19 @@ jobs:
           $filesToSign = Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi", "src-tauri/target/x86_64-pc-windows-msvc/release/*.exe"
           
           foreach ($file in $filesToSign) {
-            Write-Host "Signing: $($file.FullName)"
-            signtool sign /v /debug /fd sha256 /tr http://timestamp.sectigo.com /td sha256 /f $certPath /csp "Google Cloud KMS Provider" /kc "${{ secrets.GCP_KMS_KEY_PATH }}" $file.FullName
+            Write-Host "--- Signing: $($file.FullName) ---"
+            signtool sign /v /debug `
+              /fd sha256 `
+              /tr http://timestamp.sectigo.com `
+              /td sha256 `
+              /f $certPath `
+              /csp "Google Cloud KMS Provider" `
+              /kc "${{ secrets.GCP_KMS_KEY_PATH }}" `
+              $file.FullName
+
+            Write-Host "--- Verifying: $($file.FullName) ---"
             signtool verify /v /pa $file.FullName
+            if ($LASTEXITCODE -ne 0) { throw "Verification failed for $($file.Name)" }
           }
 
       - name: Upload Windows Artifacts
