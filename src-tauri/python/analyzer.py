@@ -844,73 +844,55 @@ def read_history_arg(arg: str) -> str:
             return "[]"
     return arg
 
+def main_loop():
+    client = None
+    # Pre-initialize these so they persist in memory
+    print("PYTHON_READY", flush=True)
+
+    for line in sys.stdin:
+        try:
+            # Rust sends a single line of JSON
+            input_data = json.loads(line)
+            
+            # Extract arguments from JSON
+            csv_path = input_data.get("csv_path")
+            query = input_data.get("query")
+            history_json = input_data.get("history", "[]")
+            api_key = input_data.get("api_key")
+
+            # Setup Environment for this request
+            if api_key:
+                os.environ["GROQ_API_KEY"] = api_key
+            
+            if client is None:
+                client = load_groq_client()
+
+            # Execute logic (your existing functions)
+            df = load_clean_csv(csv_path)
+            summary, rec_prompts, mimir_recs, chart, result, error = analyze_data(
+                df, query, client, history_json
+            )
+
+            # Package output as a single JSON line for Rust to parse
+            response = {
+                "summary": summary,
+                "recommended_prompts": rec_prompts,
+                "mimir_recommends": mimir_recs,
+                "chart": chart,
+                "error": error
+            }
+            
+            # Signal the start of the JSON block
+            print("===RESULT_START===")
+            print(json.dumps(response))
+            print("===RESULT_END===", flush=True)
+
+        except Exception as e:
+            # Send error back in structured format
+            err_resp = {"error": str(e)}
+            print("===RESULT_START===")
+            print(json.dumps(err_resp))
+            print("===RESULT_END===", flush=True)
 
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        print("Usage: python analyzer.py <csv_path> <query> [history_arg_or_@historyfile]")
-        sys.exit(1)
-
-    csv_path = sys.argv[1]
-    query = sys.argv[2]
-    history_arg = sys.argv[3] if len(sys.argv) >= 4 else "[]"
-
-    # If history is passed as @<file>, read it. This avoids huge command lines.
-    history_json = read_history_arg(history_arg)
-
-    try:
-        # Set working directory to script directory to avoid path issues
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        os.chdir(script_dir)
-
-        client = load_groq_client()
-        df = load_clean_csv(csv_path)
-
-        if df.shape[0] == 0:
-            raise ValueError("DataFrame is empty after loading and cleaning")
-
-        summary, recommended_prompts, mimir_recommends, chart, result, error = analyze_data(df, query, client, history_json)
-
-        # Output structured markers (kept the same for Rust parser)
-        print("\n=== ANALYSIS_SUMMARY_START ===")
-        print(summary if summary else "No summary available")
-        print("=== ANALYSIS_SUMMARY_END ===")
-
-        print("\n=== RECOMMENDED_PROMPTS_START ===")
-        print(json.dumps(recommended_prompts if recommended_prompts else []))
-        print("=== RECOMMENDED_PROMPTS_END ===")
-
-        print("\n=== MIMIR_RECOMMENDS_START ===")
-        print(json.dumps(mimir_recommends if mimir_recommends else []))
-        print("=== MIMIR_RECOMMENDS_END ===")
-
-        print("\n=== CHART_DATA_START ===")
-        if chart:
-            print(chart)
-        else:
-            print("null")
-        print("=== CHART_DATA_END ===")
-
-        if error:
-            print("\n=== ERROR_INFO_START ===")
-            print(error)
-            print("=== ERROR_INFO_END ===")
-
-    except Exception as e:
-        print(f"Fatal error: {e}")
-        # Provide structured output even on fatal error
-        print("\n=== ANALYSIS_SUMMARY_START ===")
-        print(f"Error loading or analyzing data: {e}")
-        print("=== ANALYSIS_SUMMARY_END ===")
-        print("\n=== RECOMMENDED_PROMPTS_START ===")
-        print("[]")
-        print("=== RECOMMENDED_PROMPTS_END ===")
-        print("\n=== MIMIR_RECOMMENDS_START ===")
-        print("[]")
-        print("=== MIMIR_RECOMMENDS_END ===")
-        print("\n=== CHART_DATA_START ===")
-        print("null")
-        print("=== CHART_DATA_END ===")
-        print("\n=== ERROR_INFO_START ===")
-        print(str(e))
-        print("=== ERROR_INFO_END ===")
-        sys.exit(1)
+    main_loop()

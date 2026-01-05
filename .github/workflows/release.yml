@@ -41,9 +41,19 @@ jobs:
           path: src-tauri/target/release/bundle/appimage/
 
   build-windows:
-    runs-on: windows-latest # <-- Corrected from runs-runs
+    runs-on: windows-latest
+    permissions:
+      contents: 'read'
+      id-token: 'write'
     steps:
       - uses: actions/checkout@v4
+
+      # 1. Auth with GCP to access HSM
+      - id: 'auth'
+        uses: 'google-github-actions/auth@v2'
+        with:
+          credentials_json: '${{ secrets.GCP_KMS_SERVICE_ACCOUNT_KEY }}'
+
       - name: Extract version
         id: extract_version
         run: echo "version=$($env:GITHUB_REF -replace 'refs/tags/v', '')" >> $env:GITHUB_OUTPUT
@@ -64,10 +74,44 @@ jobs:
           $tauriConf | ConvertTo-Json -Depth 10 | Set-Content "src-tauri/tauri.conf.json"
           (Get-Content src-tauri/Cargo.toml) -replace '^version = ".*"', 'version = "${{ steps.extract_version.outputs.version }}"' | Set-Content src-tauri/Cargo.toml
 
+      # 2. Install Cloud KMS CNG Provider
+      - name: Install Google Cloud KMS CNG Provider
+        shell: pwsh
+        run: |
+          $url = "https://github.com/GoogleCloudPlatform/kms-integrations/releases/download/cng-v1.3/kmscng-1.3-windows-amd64.zip"
+          Invoke-WebRequest -Uri $url -OutFile kms-cng.zip
+          Expand-Archive -Path kms-cng.zip -DestinationPath ./kms-cng
+          ./kms-cng/install_cng.ps1 -InstallPath "C:\kms-cng"
+          echo "C:\kms-cng" >> $GITHUB_PATH
+
+      # 3. Build App (Unsigned)
       - name: Build App
         run: npm install && npm run build && npx tauri build --target x86_64-pc-windows-msvc
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+
+      # 4. Sign the output files with HSM
+      - name: Sign Windows Binaries
+        shell: pwsh
+        run: |
+          # Prepare Certificate file
+          $certPath = "C:\sectigo_cert.crt"
+          [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String("${{ secrets.SECTIGO_CERT_BASE64 }}")) | Out-File -FilePath $certPath
+          
+          # Target both the EXE and the MSI
+          $filesToSign = Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi", "src-tauri/target/x86_64-pc-windows-msvc/release/*.exe"
+          
+          foreach ($file in $filesToSign) {
+            echo "Signing $file..."
+            signtool sign /v /debug `
+              /fd sha256 `
+              /tr http://timestamp.sectigo.com `
+              /td sha256 `
+              /f $certPath `
+              /csp "Google Cloud KMS Provider" `
+              /kc "${{ secrets.GCP_KMS_KEY_PATH }}" `
+              $file.FullName
+          }
 
       - name: Upload Windows Artifacts
         uses: actions/upload-artifact@v4
@@ -83,16 +127,13 @@ jobs:
       - name: Extract version
         id: extract_version
         run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-
       - name: Download Artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-
       - uses: actions/setup-node@v4
         with: { node-version: 20 }
       - run: npm install @aws-sdk/client-s3
-
       - name: Upload to S3
         run: node scripts/upload-update.js
         env:

@@ -5,7 +5,6 @@ use chrono;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
@@ -14,8 +13,8 @@ use tauri_plugin_updater;
 use calamine::{open_workbook, Reader, Xls, Xlsx};
 use csv::ReaderBuilder;
 use base64::{Engine as _, engine::general_purpose};
+use std::io::{BufRead, BufReader, Write};
 
-// Global API URL constant
 const API_BASE_URL: &str = "https://api.mimiranalysis.com";
 
 fn log_to_frontend(app_handle: &AppHandle, message: &str) {
@@ -47,6 +46,11 @@ struct MergeConfig {
 struct RefreshToken {
     #[serde(rename = "refreshToken")]
     refresh_token: String,
+}
+struct ActiveProcess {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    reader: BufReader<std::process::ChildStdout>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -183,7 +187,7 @@ fn load_chat_data_blocking(
 
 #[derive(Default)]
 struct PythonProcess {
-    process: Mutex<Option<std::process::Child>>,
+    process: Mutex<Option<ActiveProcess>>,
 }
 
 #[derive(Default)]
@@ -462,44 +466,41 @@ async fn start_python_service(
     state: State<'_, PythonProcess>,
 ) -> Result<String, String> {
     let mut process_lock = state.process.lock().unwrap();
+    if process_lock.is_some() { return Ok("Already running".into()); }
 
-    if process_lock.is_some() {
-        return Ok("Python service already running".to_string());
-    }
+    let (python_bin, analyzer_path) = get_python_paths(&app_handle)?;
 
-    // Get both python binary and analyzer path
-    let (python_bin, analyzer_path) = get_python_paths(&app_handle)
-        .map_err(|e| format!("Failed to get Python paths: {}", e))?;
-
-    let mut command = Command::new(&python_bin);
-    command.arg(&analyzer_path);
-    command.stdin(Stdio::piped());
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::piped());
-
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    let child = command
+    let mut child = Command::new(&python_bin)
+        .arg(&analyzer_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
         .spawn()
-        .map_err(|e| format!("Failed to start Python: {}", e))?;
+        .map_err(|e| e.to_string())?;
 
-    *process_lock = Some(child);
-    Ok("Python service started".to_string())
+    let stdin = child.stdin.take().ok_or("Failed to open stdin")?;
+    let stdout = child.stdout.take().ok_or("Failed to open stdout")?;
+    let mut reader = BufReader::new(stdout);
+
+    // Wait for "PYTHON_READY" signal from the script
+    let mut ready_line = String::new();
+    reader.read_line(&mut ready_line).map_err(|e| e.to_string())?;
+
+    *process_lock = Some(ActiveProcess { child, stdin, reader });
+    Ok("Python service started and warmed up".to_string())
 }
 
 #[tauri::command]
 async fn stop_python_service(state: State<'_, PythonProcess>) -> Result<String, String> {
     let mut process_lock = state.process.lock().unwrap();
 
-    if let Some(mut child) = process_lock.take() {
-        child
+    if let Some(mut active_proc) = process_lock.take() {
+        active_proc.child
             .kill()
             .map_err(|e| format!("Failed to stop Python: {}", e))?;
+            
+        let _ = active_proc.child.wait(); 
+        
         Ok("Python service stopped".to_string())
     } else {
         Err("Python service not running".to_string())
@@ -514,110 +515,64 @@ async fn analyze_query(
     query: String,
     csv_path: String,
     state: State<'_, AppState>,
+    py_state: State<'_, PythonProcess>,
 ) -> Result<AnalysisResponse, String> {
-    log_to_frontend(&app_handle, &format!("Analyzing: {}", query));
-
-    let (python_bin, analyzer_path) =
-        get_python_paths(&app_handle).map_err(|e| format!("Failed to get Python paths: {}", e))?;
-
-    let jwt_token = {
-        let token_guard = state.jwt_token.lock().unwrap();
-        token_guard.clone()
-    };
-
+    
+    let jwt_token = state.jwt_token.lock().unwrap().clone();
     let api_key = get_api_key(jwt_token).await?;
 
-    let (_current_chat_name, history_json) = {
-        let current_chat = state.current_chat.lock().unwrap();
-        let mut chats = state.chats.lock().unwrap();
-
-        let chat_data = chats
-            .get_mut(&*current_chat)
-            .ok_or("Current chat not found".to_string())?;
-
-        chat_data.csv_path = Some(csv_path.clone());
-
-        let history_json = serde_json::to_string(&chat_data.history)
-            .map_err(|e| format!("Failed to serialize history: {}", e))?;
-
-        (current_chat.clone(), history_json)
-    };
-
-    let mut tmp_path = std::env::temp_dir();
-    let filename = format!(
-        "mimir_history_{}.json",
-        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
-    );
-    tmp_path.push(&filename);
-
-    if let Err(e) = std::fs::write(&tmp_path, &history_json) {
-        eprintln!("Warning: Could not write history temp file: {}", e);
-    }
-
-    let mut command = Command::new(&python_bin);
-    command.arg(&analyzer_path);
-    command.arg(csv_path.clone());
-    command.arg(query.clone());
-
-    let history_arg = format!("@{}", tmp_path.to_string_lossy());
-    command.arg(history_arg);
-
-    command.env("GROQ_API_KEY", &api_key);
-    command.env("PYTHONUTF8", "1");
-    command.env("PYTHONIOENCODING", "utf-8");
-
-    #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    let output = command
-        .output()
-        .map_err(|e| format!("Failed to execute Python: {}", e))?;
-
-    if tmp_path.exists() {
-        let _ = std::fs::remove_file(&tmp_path);
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-    println!("=== Python STDOUT ===");
-    println!("{}", stdout);
-    println!("=== Python STDERR ===");
-    println!("{}", stderr);
-    println!("=====================");
-
-    let response = parse_python_output(&stdout, &stderr);
-
-    {
-        let current_chat = state.current_chat.lock().unwrap();
-        let mut chats = state.chats.lock().unwrap();
-
-        if let Some(chat_data) = chats.get_mut(&*current_chat) {
-            chat_data.history.push(QueryHistory {
-                query: query.clone(),
-                response: response.clone(),
-                timestamp: chrono::Local::now().to_rfc3339(),
-            });
-
-            let app_handle_clone = app_handle.clone();
-            let current_chat_clone = current_chat.clone();
-            let chat_data_clone = chat_data.clone();
-
-            tauri::async_runtime::spawn_blocking(move || {
-                if let Err(e) = save_chat_data_blocking(
-                    &app_handle_clone,
-                    &current_chat_clone,
-                    &chat_data_clone,
-                ) {
-                    eprintln!("Warning: Could not save chat data: {}", e);
-                }
-            });
+        let is_running = py_state.process.lock().unwrap().is_some();
+        if !is_running {
+            start_python_service(app_handle.clone(), py_state.clone()).await?;
         }
     }
+
+    let response = {
+        let mut py_lock = py_state.process.lock().unwrap();
+        let proc = py_lock.as_mut().ok_or("Python service connection lost")?;
+
+        let history = {
+            let current = state.current_chat.lock().unwrap();
+            let chats = state.chats.lock().unwrap();
+            let chat_data = chats.get(&*current).ok_or("Chat not found")?;
+            serde_json::to_string(&chat_data.history).unwrap_or_else(|_| "[]".to_string())
+        };
+
+        let payload = serde_json::json!({
+            "query": query,
+            "csv_path": csv_path,
+            "history": history,
+            "api_key": api_key
+        });
+
+        writeln!(proc.stdin, "{}", payload.to_string()).map_err(|e| e.to_string())?;
+        proc.stdin.flush().map_err(|e| e.to_string())?;
+
+        let mut json_result = String::new();
+        let mut recording = false;
+        loop {
+            let mut line = String::new();
+            proc.reader.read_line(&mut line).map_err(|e| e.to_string())?;
+            let trimmed = line.trim();
+            
+            if trimmed == "===RESULT_START===" {
+                recording = true;
+                continue;
+            }
+            if trimmed == "===RESULT_END===" {
+                break;
+            }
+            if recording {
+                json_result.push_str(&line);
+            }
+        }
+        
+        let parsed: AnalysisResponse = serde_json::from_str(&json_result)
+            .map_err(|e| format!("JSON Parse Error: {}. Raw: {}", e, json_result))?;
+        
+        parsed 
+    }; 
 
     Ok(response)
 }
