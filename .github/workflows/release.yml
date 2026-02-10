@@ -90,7 +90,17 @@ jobs:
           Expand-Archive -Path kms-cng.zip -DestinationPath ./kms_temp -Force
           $msi = Get-ChildItem -Path ./kms_temp -Filter "*.msi" -Recurse | Select-Object -First 1
           Start-Process msiexec.exe -ArgumentList "/i `"$($msi.FullName)`" /qn /norestart" -Wait
-          echo "C:\Program Files\Google\Cloud KMS CNG Provider" >> $env:GITHUB_PATH
+          
+          # Create the directory for the config file
+          New-Item -ItemType Directory -Force -Path "C:\Windows\KMSCNG"
+          
+          # Write the config file required by the Google CNG Provider
+          # Note: The provider requires this specific structure
+          $configContent = @"
+          v1:
+            - keypath: "${{ secrets.GCP_KMS_KEY_PATH }}"
+          "@
+          Set-Content -Path "C:\Windows\KMSCNG\config.yaml" -Value $configContent
 
       - name: Build App
         run: npm install && npm run build && npx tauri build --target x86_64-pc-windows-msvc
@@ -100,31 +110,28 @@ jobs:
       - name: Sign and Verify Windows Binaries
         shell: pwsh
         run: |
-          # 1. Setup the certificate
+          # 1. Prepare Certificate
           $certPath = "$pwd\sectigo_cert.crt"
           $certBytes = [System.Convert]::FromBase64String("${{ secrets.SECTIGO_CERT_BASE64 }}")
           [System.IO.File]::WriteAllBytes($certPath, $certBytes)
           
-          # 2. Import to User Store
+          # 2. Import to Store
           $cert = Import-Certificate -FilePath $certPath -CertStoreLocation Cert:\CurrentUser\My
           $thumbprint = $cert.Thumbprint
           Write-Host "Using Certificate Thumbprint: $thumbprint"
 
-          # 3. CRITICAL: Manually associate the cert with the Google KMS Provider
-          # This sets the CSP and Key Container name for the imported certificate
+          # 3. Associate Key (This now works because the config.yaml exists)
           certutil -csp "Google Cloud KMS Provider" -user -repairstore My $thumbprint
           
           $filesToSign = Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi", "src-tauri/target/x86_64-pc-windows-msvc/release/*.exe"
           
           foreach ($file in $filesToSign) {
             Write-Host "--- Signing: $($file.FullName) ---"
-            # We now sign using the store directly since repairstore linked it
             signtool sign /v /debug `
               /fd sha256 `
               /tr http://timestamp.sectigo.com `
               /td sha256 `
               /sha1 $thumbprint `
-              /sm `
               $file.FullName
 
             Write-Host "--- Verifying: $($file.FullName) ---"
