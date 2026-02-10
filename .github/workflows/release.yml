@@ -91,16 +91,19 @@ jobs:
           $msi = Get-ChildItem -Path ./kms_temp -Filter "*.msi" -Recurse | Select-Object -First 1
           Start-Process msiexec.exe -ArgumentList "/i `"$($msi.FullName)`" /qn /norestart" -Wait
           
-          # Create the directory for the config file
-          New-Item -ItemType Directory -Force -Path "C:\Windows\KMSCNG"
-          
-          # Write the config file required by the Google CNG Provider
-          # Note: The provider requires this specific structure
+          # Use a more robust config structure
+          # Some versions of the provider prefer 'certificates' over 'v1'
+          New-Item -ItemType Directory -Force -Path "C:\KMS"
+          $configPath = "C:\KMS\config.yaml"
           $configContent = @"
-          v1:
+          certificates:
             - keypath: "${{ secrets.GCP_KMS_KEY_PATH }}"
           "@
-          Set-Content -Path "C:\Windows\KMSCNG\config.yaml" -Value $configContent
+          Set-Content -Path $configPath -Value $configContent
+          
+          # Set the environment variable so the DLL knows exactly where to look
+          echo "KMSCNG_CONFIG=$configPath" >> $env:GITHUB_ENV
+          echo "C:\Program Files\Google\Cloud KMS CNG Provider" >> $env:GITHUB_PATH
 
       - name: Build App
         run: npm install && npm run build && npx tauri build --target x86_64-pc-windows-msvc
@@ -109,18 +112,20 @@ jobs:
 
       - name: Sign and Verify Windows Binaries
         shell: pwsh
+        env:
+          KMSCNG_CONFIG: "C:\KMS\config.yaml"
         run: |
-          # 1. Prepare Certificate
           $certPath = "$pwd\sectigo_cert.crt"
           $certBytes = [System.Convert]::FromBase64String("${{ secrets.SECTIGO_CERT_BASE64 }}")
           [System.IO.File]::WriteAllBytes($certPath, $certBytes)
           
-          # 2. Import to Store
+          # Import and get thumbprint
           $cert = Import-Certificate -FilePath $certPath -CertStoreLocation Cert:\CurrentUser\My
           $thumbprint = $cert.Thumbprint
           Write-Host "Using Certificate Thumbprint: $thumbprint"
 
-          # 3. Associate Key (This now works because the config.yaml exists)
+          # Use the explicit provider and container
+          # We use the keypath as the container name, which is a requirement for the Google CSP
           certutil -csp "Google Cloud KMS Provider" -user -repairstore My $thumbprint
           
           $filesToSign = Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi", "src-tauri/target/x86_64-pc-windows-msvc/release/*.exe"
@@ -132,6 +137,8 @@ jobs:
               /tr http://timestamp.sectigo.com `
               /td sha256 `
               /sha1 $thumbprint `
+              /csp "Google Cloud KMS Provider" `
+              /kc "${{ secrets.GCP_KMS_KEY_PATH }}" `
               $file.FullName
 
             Write-Host "--- Verifying: $($file.FullName) ---"
