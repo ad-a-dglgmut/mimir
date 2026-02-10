@@ -1,4 +1,46 @@
-build-windows:
+name: Build and Release
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract version
+        id: extract_version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y libappindicator3-dev librsvg2-dev libgtk-3-dev libwebkit2gtk-4.1-dev libglib2.0-dev patchelf jq
+
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Python (Linux)
+        run: |
+          chmod +x src-tauri/python/create-venvs.sh
+          ./src-tauri/python/create-venvs.sh
+          cd src-tauri
+          jq --arg ver "${{ steps.extract_version.outputs.version }}" '.version = $ver | .bundle.resources = ["python/**/*"]' tauri.conf.json > tmp.json && mv tmp.json tauri.conf.json
+          sed -i 's/^version = ".*"/version = "'"${{ steps.extract_version.outputs.version }}"'"/' Cargo.toml
+
+      - name: Build App
+        run: npm install && npm run build && npx tauri build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+
+      - name: Upload Linux Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-build
+          path: src-tauri/target/release/bundle/appimage/
+
+  build-windows:
     runs-on: windows-latest
     permissions:
       contents: 'read'
@@ -6,6 +48,7 @@ build-windows:
     steps:
       - uses: actions/checkout@v4
 
+      # 1. Authenticate with Google Cloud
       - id: 'auth'
         uses: 'google-github-actions/auth@v2'
         with:
@@ -19,6 +62,7 @@ build-windows:
         with: { node-version: 20 }
       - uses: dtolnay/rust-toolchain@stable
       
+      # Ensure signtool is in PATH
       - name: Add Signtool to PATH
         shell: pwsh
         run: |
@@ -40,6 +84,7 @@ build-windows:
           $tauriConf | ConvertTo-Json -Depth 10 | Set-Content "src-tauri/tauri.conf.json"
           (Get-Content src-tauri/Cargo.toml) -replace '^version = ".*"', 'version = "${{ steps.extract_version.outputs.version }}"' | Set-Content src-tauri/Cargo.toml
 
+      # 2. Install Cloud KMS CNG Provider
       - name: Install Google Cloud KMS CNG Provider
         shell: pwsh
         run: |
@@ -50,30 +95,31 @@ build-windows:
           Start-Process msiexec.exe -ArgumentList "/i `"$($msi.FullName)`" /qn /norestart" -Wait
           echo "C:\Program Files\Google\Cloud KMS CNG Provider" >> $env:GITHUB_PATH
 
+      # 3. Build App
       - name: Build App
         run: npm install && npm run build && npx tauri build --target x86_64-pc-windows-msvc
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
 
+      # 4. Sign and Verify via Google HSM
       - name: Sign and Verify Windows Binaries
         shell: pwsh
         run: |
-          # 1. Prepare Certificate
+          # Write public cert to file
           $certPath = "$pwd\sectigo_cert.crt"
           $certBytes = [System.Convert]::FromBase64String("${{ secrets.SECTIGO_CERT_BASE64 }}")
           [System.IO.File]::WriteAllBytes($certPath, $certBytes)
           
-          # 2. Extract Thumbprint and Install to temporary User Store
-          # This "links" the cert to the Cloud KMS CSP in the Windows session
+          # Import cert to the CurrentUser store so the CNG provider can map it
           $cert = Import-Certificate -FilePath $certPath -CertStoreLocation Cert:\CurrentUser\My
           $thumbprint = $cert.Thumbprint
           Write-Host "Using Certificate Thumbprint: $thumbprint"
-
+          
           $filesToSign = Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi", "src-tauri/target/x86_64-pc-windows-msvc/release/*.exe"
           
           foreach ($file in $filesToSign) {
             Write-Host "--- Signing: $($file.FullName) ---"
-            # Use /sha1 to force the correct certificate
+            # Using /sha1 ensures signtool uses our specific imported cert
             signtool sign /v /debug `
               /fd sha256 `
               /tr http://timestamp.sectigo.com `
@@ -86,3 +132,31 @@ build-windows:
             Write-Host "--- Verifying: $($file.FullName) ---"
             signtool verify /v /pa $file.FullName
           }
+
+      - name: Upload Windows Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build
+          path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/
+
+  upload-updates:
+    runs-on: ubuntu-latest
+    needs: [build-linux, build-windows]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract version
+        id: extract_version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: npm install @aws-sdk/client-s3
+      - name: Upload to S3
+        run: node scripts/upload-update.js
+        env:
+          APP_VERSION: ${{ steps.extract_version.outputs.version }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
