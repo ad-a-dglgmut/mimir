@@ -61,6 +61,10 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 20 }
       - uses: dtolnay/rust-toolchain@stable
+      
+      # FIX: This action adds signtool.exe and other SDK tools to the PATH
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
 
       - name: Build Python (Windows)
         shell: pwsh
@@ -74,7 +78,7 @@ jobs:
           $tauriConf | ConvertTo-Json -Depth 10 | Set-Content "src-tauri/tauri.conf.json"
           (Get-Content src-tauri/Cargo.toml) -replace '^version = ".*"', 'version = "${{ steps.extract_version.outputs.version }}"' | Set-Content src-tauri/Cargo.toml
 
-      # 2. Install Cloud KMS CNG Provider via MSI (More stable than script)
+      # 2. Install Cloud KMS CNG Provider
       - name: Install Google Cloud KMS CNG Provider
         shell: pwsh
         run: |
@@ -90,7 +94,6 @@ jobs:
             throw "MSI installer not found in ZIP!"
           }
           
-          # Add the default installation path to the environment
           $defaultPath = "C:\Program Files\Google\Cloud KMS CNG Provider"
           if (Test-Path $defaultPath) {
              echo $defaultPath >> $env:GITHUB_PATH
@@ -115,6 +118,7 @@ jobs:
           
           foreach ($file in $filesToSign) {
             Write-Host "--- Signing: $($file.FullName) ---"
+            # Signtool should now be recognized thanks to Setup MSBuild
             signtool sign /v /debug `
               /fd sha256 `
               /tr http://timestamp.sectigo.com `
