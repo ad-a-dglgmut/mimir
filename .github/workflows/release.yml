@@ -91,17 +91,15 @@ jobs:
           $msi = Get-ChildItem -Path ./kms_temp -Filter "*.msi" -Recurse | Select-Object -First 1
           Start-Process msiexec.exe -ArgumentList "/i `"$($msi.FullName)`" /qn /norestart" -Wait
           
-          # Use a more robust config structure
-          # Some versions of the provider prefer 'certificates' over 'v1'
+          # Setup Config Directory
           New-Item -ItemType Directory -Force -Path "C:\KMS"
-          $configPath = "C:\KMS\config.yaml"
+          $configPath = "C:/KMS/config.yaml"
           $configContent = @"
           certificates:
             - keypath: "${{ secrets.GCP_KMS_KEY_PATH }}"
           "@
           Set-Content -Path $configPath -Value $configContent
           
-          # Set the environment variable so the DLL knows exactly where to look
           echo "KMSCNG_CONFIG=$configPath" >> $env:GITHUB_ENV
           echo "C:\Program Files\Google\Cloud KMS CNG Provider" >> $env:GITHUB_PATH
 
@@ -113,19 +111,17 @@ jobs:
       - name: Sign and Verify Windows Binaries
         shell: pwsh
         env:
-          KMSCNG_CONFIG: "C:\KMS\config.yaml"
+          KMSCNG_CONFIG: "C:/KMS/config.yaml"
         run: |
-          $certPath = "$pwd\sectigo_cert.crt"
+          $certPath = "$pwd/sectigo_cert.crt"
           $certBytes = [System.Convert]::FromBase64String("${{ secrets.SECTIGO_CERT_BASE64 }}")
           [System.IO.File]::WriteAllBytes($certPath, $certBytes)
           
-          # Import and get thumbprint
           $cert = Import-Certificate -FilePath $certPath -CertStoreLocation Cert:\CurrentUser\My
           $thumbprint = $cert.Thumbprint
           Write-Host "Using Certificate Thumbprint: $thumbprint"
 
-          # Use the explicit provider and container
-          # We use the keypath as the container name, which is a requirement for the Google CSP
+          # Repair store to link cert to KMS provider
           certutil -csp "Google Cloud KMS Provider" -user -repairstore My $thumbprint
           
           $filesToSign = Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi", "src-tauri/target/x86_64-pc-windows-msvc/release/*.exe"
