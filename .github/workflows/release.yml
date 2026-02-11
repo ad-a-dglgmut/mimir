@@ -117,20 +117,23 @@ jobs:
           # 2. Repair store using Provider|Container syntax
           $csp = "Google Cloud KMS Provider"
           $keyContainer = "${{ secrets.GCP_KMS_KEY_PATH }}"
-          certutil -user -repairstore My $thumbprint "$csp|$keyContainer"
+          certutil -user -repairstore My "$thumbprint" "$csp|$keyContainer"
 
           # 3. Verify association
-          certutil -user -verifystore My $thumbprint
+          certutil -user -verifystore My "$thumbprint"
 
           # 4. Sign
           $filesToSign = Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi", "src-tauri/target/x86_64-pc-windows-msvc/release/*.exe"
           foreach ($file in $filesToSign) {
             Write-Host "--- Signing: $($file.FullName) ---"
+            # Explicitly providing /csp and /k ensures signtool uses the KMS provider
             signtool sign /v /debug `
               /fd sha256 `
               /tr http://timestamp.sectigo.com `
               /td sha256 `
               /sha1 $thumbprint `
+              /csp "$csp" `
+              /k "$keyContainer" `
               $file.FullName
 
             Write-Host "--- Verifying: $($file.FullName) ---"
