@@ -48,6 +48,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 1. Authenticate with Google Cloud
       - id: 'auth'
         uses: 'google-github-actions/auth@v2'
         with:
@@ -61,6 +62,7 @@ jobs:
         with: { node-version: 20 }
       - uses: dtolnay/rust-toolchain@stable
       
+      # Ensure signtool is in PATH
       - name: Add Signtool to PATH
         shell: pwsh
         run: |
@@ -82,6 +84,7 @@ jobs:
           $tauriConf | ConvertTo-Json -Depth 10 | Set-Content "src-tauri/tauri.conf.json"
           (Get-Content src-tauri/Cargo.toml) -replace '^version = ".*"', 'version = "${{ steps.extract_version.outputs.version }}"' | Set-Content src-tauri/Cargo.toml
 
+      # 2. Install Cloud KMS CNG Provider
       - name: Install Google Cloud KMS CNG Provider
         shell: pwsh
         run: |
@@ -91,6 +94,7 @@ jobs:
           $msi = Get-ChildItem -Path ./kms_temp -Filter "*.msi" -Recurse | Select-Object -First 1
           Start-Process msiexec.exe -ArgumentList "/i `"$($msi.FullName)`" /qn /norestart" -Wait
           
+          # Write Config (Flat schema)
           $configDir = "C:\Windows\KMSCNG"
           if (!(Test-Path $configDir)) { New-Item -ItemType Directory -Path $configDir -Force }
           $configContent = "certificates:`n  - keypath: `"${{ secrets.GCP_KMS_KEY_PATH }}`""
@@ -98,15 +102,17 @@ jobs:
           
           echo "C:\Program Files\Google\Cloud KMS CNG Provider" >> $env:GITHUB_PATH
 
+      # 3. Build App
       - name: Build App
         run: npm install && npm run build && npx tauri build --target x86_64-pc-windows-msvc
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
 
+      # 4. Sign and Verify via Google HSM
       - name: Sign and Verify Windows Binaries
         shell: pwsh
         run: |
-          # 1. Import Sectigo Cert
+          # A. Setup Sectigo Cert
           $certPath = "$pwd/sectigo_cert.crt"
           $certBytes = [System.Convert]::FromBase64String("${{ secrets.SECTIGO_CERT_BASE64 }}")
           [System.IO.File]::WriteAllBytes($certPath, $certBytes)
@@ -114,23 +120,12 @@ jobs:
           $thumbprint = $cert.Thumbprint
           Write-Host "Sectigo Thumbprint: $thumbprint"
 
-          # 2. Create the Association INF file
-          # This explicitly maps the cert to the Google CSP and Key Container
-          $infPath = "$pwd/associate.inf"
-          $infContent = @"
-          [Version]
-          Signature="`$Windows NT`"
-          [Properties]
-          11 = "{text}Google Cloud KMS Provider"
-          2 = "{text}${{ secrets.GCP_KMS_KEY_PATH }}"
-          "@
-          [System.IO.File]::WriteAllText($infPath, $infContent)
-
-          # 3. Force repair the store with the INF
-          # This 'pins' the Sectigo cert to the Google KMS key
-          certutil -v -repairstore -user My $thumbprint $infPath
-
-          # 4. Sign Binaries
+          # B. Direct Link Private Key to Provider
+          # This sets the registry properties for the specific certificate in the store
+          certutil -user -f -setreg "Cert:\CurrentUser\My\$thumbprint\Provider" "Google Cloud KMS Provider"
+          certutil -user -f -setreg "Cert:\CurrentUser\My\$thumbprint\KeyContainer" "${{ secrets.GCP_KMS_KEY_PATH }}"
+          
+          # C. Final Sign
           $filesToSign = Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi", "src-tauri/target/x86_64-pc-windows-msvc/release/*.exe"
           foreach ($file in $filesToSign) {
             Write-Host "--- Signing: $($file.FullName) ---"
@@ -139,8 +134,6 @@ jobs:
               /tr http://timestamp.sectigo.com `
               /td sha256 `
               /sha1 $thumbprint `
-              /csp "Google Cloud KMS Provider" `
-              /kc "${{ secrets.GCP_KMS_KEY_PATH }}" `
               $file.FullName
 
             Write-Host "--- Verifying: $($file.FullName) ---"
@@ -152,3 +145,25 @@ jobs:
         with:
           name: windows-build
           path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/
+
+  upload-updates:
+    runs-on: ubuntu-latest
+    needs: [build-linux, build-windows]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract version
+        id: extract_version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: npm install @aws-sdk/client-s3
+      - name: Upload to S3
+        run: node scripts/upload-update.js
+        env:
+          APP_VERSION: ${{ steps.extract_version.outputs.version }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
