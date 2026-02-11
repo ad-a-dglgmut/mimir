@@ -93,6 +93,7 @@ jobs:
           
           $configDir = "C:\Windows\KMSCNG"
           if (!(Test-Path $configDir)) { New-Item -ItemType Directory -Path $configDir -Force }
+          # Ensure keypath is written exactly as intended
           $configContent = "certificates:`n  - keypath: `"${{ secrets.GCP_KMS_KEY_PATH }}`""
           [System.IO.File]::WriteAllText("$configDir\config.yaml", $configContent, (New-Object System.Text.UTF8Encoding($false)))
           
@@ -110,30 +111,36 @@ jobs:
           $certPath = "$pwd/sectigo_cert.crt"
           $certBytes = [System.Convert]::FromBase64String("${{ secrets.SECTIGO_CERT_BASE64 }}")
           [System.IO.File]::WriteAllBytes($certPath, $certBytes)
-          $cert = Import-Certificate -FilePath $certPath -CertStoreLocation Cert:\CurrentUser\My
+          
+          # Import to both stores to ensure visibility
+          Import-Certificate -FilePath $certPath -CertStoreLocation Cert:\CurrentUser\My
+          $cert = Import-Certificate -FilePath $certPath -CertStoreLocation Cert:\LocalMachine\My
+          
           $thumbprint = $cert.Thumbprint
           Write-Host "Sectigo Thumbprint: $thumbprint"
 
-          # 2. Repair store using Provider|Container syntax
+          # 2. Association Fix
+          # Using the full provider name and ensuring the key container is quoted properly
           $csp = "Google Cloud KMS Provider"
           $keyContainer = "${{ secrets.GCP_KMS_KEY_PATH }}"
+          
+          # Attempt repair on both stores; ignore errors for the one that doesn't apply
+          certutil -repairstore My "$thumbprint" "$csp|$keyContainer"
           certutil -user -repairstore My "$thumbprint" "$csp|$keyContainer"
 
-          # 3. Verify association
-          certutil -user -verifystore My "$thumbprint"
-
-          # 4. Sign
+          # 3. Sign
           $filesToSign = Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi", "src-tauri/target/x86_64-pc-windows-msvc/release/*.exe"
           foreach ($file in $filesToSign) {
             Write-Host "--- Signing: $($file.FullName) ---"
-            # Explicitly providing /csp and /k ensures signtool uses the KMS provider
+            # We add /csp and /k to force SignTool to talk to Google KMS directly
+            # This often bypasses the "Could not associate private key" store error
             signtool sign /v /debug `
               /fd sha256 `
               /tr http://timestamp.sectigo.com `
               /td sha256 `
               /sha1 $thumbprint `
               /csp "$csp" `
-              /k "$keyContainer" `
+              /k "[ $keyContainer ]" `
               $file.FullName
 
             Write-Host "--- Verifying: $($file.FullName) ---"
