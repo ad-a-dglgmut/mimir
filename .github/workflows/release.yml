@@ -93,8 +93,8 @@ jobs:
           
           $configDir = "C:\Windows\KMSCNG"
           if (!(Test-Path $configDir)) { New-Item -ItemType Directory -Path $configDir -Force }
-          # Ensure keypath is written exactly as intended
-          $configContent = "certificates:`n  - keypath: `"${{ secrets.GCP_KMS_KEY_PATH }}`""
+          $keyPath = "${{ secrets.GCP_KMS_KEY_PATH }}".Trim()
+          $configContent = "certificates:`n  - keypath: `"$keyPath`""
           [System.IO.File]::WriteAllText("$configDir\config.yaml", $configContent, (New-Object System.Text.UTF8Encoding($false)))
           
           echo "C:\Program Files\Google\Cloud KMS CNG Provider" >> $env:GITHUB_PATH
@@ -107,43 +107,38 @@ jobs:
       - name: Sign and Verify Windows Binaries
         shell: pwsh
         run: |
-          # 1. Setup Sectigo Cert
-          $certPath = "$pwd/sectigo_cert.crt"
+          # 1. Clean and Validate Key Path
+          $keyPath = "${{ secrets.GCP_KMS_KEY_PATH }}".Trim().Trim('"').Trim("'").Trim('/')
+          
+          # 2. Setup Sectigo Cert (Decoded from the P7B/PEM chain)
           $certBytes = [System.Convert]::FromBase64String("${{ secrets.SECTIGO_CERT_BASE64 }}")
+          $certPath = "$pwd/sectigo_full.crt"
           [System.IO.File]::WriteAllBytes($certPath, $certBytes)
           
-          # Import to both stores to ensure visibility
-          Import-Certificate -FilePath $certPath -CertStoreLocation Cert:\CurrentUser\My
-          $cert = Import-Certificate -FilePath $certPath -CertStoreLocation Cert:\LocalMachine\My
+          # Extract Thumbprint from the primary certificate
+          $objCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certPath)
+          $thumbprint = $objCert.Thumbprint
+          Write-Host "--- CERTIFICATE INSPECTION ---"
+          Write-Host "Subject: $($objCert.Subject)"
+          Write-Host "Issuer:  $($objCert.Issuer)"
+          Write-Host "Thumbprint: $thumbprint"
           
-          $thumbprint = $cert.Thumbprint
-          Write-Host "Sectigo Thumbprint: $thumbprint"
+          # Safety Check
+          if ($objCert.Issuer -match "Cavium" -or $objCert.Issuer -match "Google") {
+             Write-Error "ERROR: Still using HSM metadata cert. Update SECTIGO_CERT_BASE64 with the converted CollectCCC file."
+             exit 1
+          }
 
-          # 2. Association Fix
-          # Using the full provider name and ensuring the key container is quoted properly
+          # 3. Import and Link to Cloud HSM
+          $cert = Import-Certificate -FilePath $certPath -CertStoreLocation Cert:\CurrentUser\My
           $csp = "Google Cloud KMS Provider"
-          $keyContainer = "${{ secrets.GCP_KMS_KEY_PATH }}"
-          
-          # Attempt repair on both stores; ignore errors for the one that doesn't apply
-          certutil -repairstore My "$thumbprint" "$csp|$keyContainer"
-          certutil -user -repairstore My "$thumbprint" "$csp|$keyContainer"
+          certutil -user -repairstore My $thumbprint "$csp|$keyPath"
 
-          # 3. Sign
+          # 4. Sign Binaries
           $filesToSign = Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi", "src-tauri/target/x86_64-pc-windows-msvc/release/*.exe"
           foreach ($file in $filesToSign) {
             Write-Host "--- Signing: $($file.FullName) ---"
-            # We add /csp and /k to force SignTool to talk to Google KMS directly
-            # This often bypasses the "Could not associate private key" store error
-            signtool sign /v /debug `
-              /fd sha256 `
-              /tr http://timestamp.sectigo.com `
-              /td sha256 `
-              /sha1 $thumbprint `
-              /csp "$csp" `
-              /k "[ $keyContainer ]" `
-              $file.FullName
-
-            Write-Host "--- Verifying: $($file.FullName) ---"
+            signtool sign /v /debug /fd sha256 /tr http://timestamp.sectigo.com /td sha256 /sha1 $thumbprint /csp "$csp" /kc "$keyPath" $file.FullName
             signtool verify /v /pa $file.FullName
           }
 
@@ -173,4 +168,4 @@ jobs:
         env:
           APP_VERSION: ${{ steps.extract_version.outputs.version }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+         AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
