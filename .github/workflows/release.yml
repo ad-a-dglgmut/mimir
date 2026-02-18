@@ -107,31 +107,44 @@ jobs:
       - name: Sign and Verify Windows Binaries
         shell: pwsh
         run: |
-          # 1. Sanitize Key Path
+          # 1. Clean and Validate Key Path
           $keyPath = "${{ secrets.GCP_KMS_KEY_PATH }}".Trim().Trim('"').Trim("'").Trim('/')
+          $csp = "Google Cloud KMS Provider"
           
-          # 2. Setup Sectigo Cert (Decoded from your converted PEM chain)
+          # 2. Setup Sectigo Cert
           $certBytes = [System.Convert]::FromBase64String("${{ secrets.SECTIGO_CERT_BASE64 }}")
           $certPath = "$pwd/sectigo_full.crt"
           [System.IO.File]::WriteAllBytes($certPath, $certBytes)
           
           $objCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certPath)
           $thumbprint = $objCert.Thumbprint
-          Write-Host "--- CERTIFICATE INSPECTION ---"
+          Write-Host "--- IDENTITY DETECTED ---"
           Write-Host "Subject: $($objCert.Subject)"
-          Write-Host "Issuer:  $($objCert.Issuer)"
           Write-Host "Thumbprint: $thumbprint"
-          
-          # 3. Import and Link to Cloud HSM
-          $cert = Import-Certificate -FilePath $certPath -CertStoreLocation Cert:\CurrentUser\My
-          $csp = "Google Cloud KMS Provider"
-          certutil -user -repairstore My $thumbprint "$csp|$keyPath"
 
-          # 4. Sign Binaries
+          # 3. Import to Store
+          $cert = Import-Certificate -FilePath $certPath -CertStoreLocation Cert:\CurrentUser\My
+
+          # 4. Force Link using Splatting to prevent shell parsing errors
+          # This 'pipes' the certificate thumbprint to the Provider and the Key Path
+          $repairArgs = @("-user", "-repairstore", "My", "$thumbprint", "$csp|$keyPath")
+          & certutil @repairArgs
+
+          # 5. Sign Binaries
           $filesToSign = Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi", "src-tauri/target/x86_64-pc-windows-msvc/release/*.exe"
           foreach ($file in $filesToSign) {
             Write-Host "--- Signing: $($file.FullName) ---"
-            signtool sign /v /debug /fd sha256 /tr http://timestamp.sectigo.com /td sha256 /sha1 $thumbprint /csp "$csp" /kc "$keyPath" $file.FullName
+            # Point signtool directly to the CSP and the Key Container (the path)
+            signtool sign /v /debug `
+              /fd sha256 `
+              /tr http://timestamp.sectigo.com `
+              /td sha256 `
+              /sha1 $thumbprint `
+              /csp "$csp" `
+              /kc "$keyPath" `
+              $file.FullName
+
+            Write-Host "--- Verifying: $($file.FullName) ---"
             signtool verify /v /pa $file.FullName
           }
 
