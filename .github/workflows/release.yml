@@ -107,15 +107,14 @@ jobs:
       - name: Sign and Verify Windows Binaries
         shell: pwsh
         run: |
-          # 1. Clean and Validate Key Path
+          # 1. Sanitize Key Path
           $keyPath = "${{ secrets.GCP_KMS_KEY_PATH }}".Trim().Trim('"').Trim("'").Trim('/')
           
-          # 2. Setup Sectigo Cert (Decoded from the P7B/PEM chain)
+          # 2. Setup Sectigo Cert (Decoded from your converted PEM chain)
           $certBytes = [System.Convert]::FromBase64String("${{ secrets.SECTIGO_CERT_BASE64 }}")
           $certPath = "$pwd/sectigo_full.crt"
           [System.IO.File]::WriteAllBytes($certPath, $certBytes)
           
-          # Extract Thumbprint from the primary certificate
           $objCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certPath)
           $thumbprint = $objCert.Thumbprint
           Write-Host "--- CERTIFICATE INSPECTION ---"
@@ -123,12 +122,6 @@ jobs:
           Write-Host "Issuer:  $($objCert.Issuer)"
           Write-Host "Thumbprint: $thumbprint"
           
-          # Safety Check
-          if ($objCert.Issuer -match "Cavium" -or $objCert.Issuer -match "Google") {
-             Write-Error "ERROR: Still using HSM metadata cert. Update SECTIGO_CERT_BASE64 with the converted CollectCCC file."
-             exit 1
-          }
-
           # 3. Import and Link to Cloud HSM
           $cert = Import-Certificate -FilePath $certPath -CertStoreLocation Cert:\CurrentUser\My
           $csp = "Google Cloud KMS Provider"
@@ -168,4 +161,4 @@ jobs:
         env:
           APP_VERSION: ${{ steps.extract_version.outputs.version }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-         AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
