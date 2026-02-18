@@ -107,7 +107,7 @@ jobs:
       - name: Sign and Verify Windows Binaries
         shell: pwsh
         run: |
-          # 1. Clean and Validate Key Path
+          # 1. Prepare Paths
           $keyPath = "${{ secrets.GCP_KMS_KEY_PATH }}".Trim().Trim('"').Trim("'").Trim('/')
           $csp = "Google Cloud KMS Provider"
           
@@ -125,26 +125,25 @@ jobs:
           # 3. Import to Store
           $cert = Import-Certificate -FilePath $certPath -CertStoreLocation Cert:\CurrentUser\My
 
-          # 4. Force Link using Splatting to prevent shell parsing errors
-          # This 'pipes' the certificate thumbprint to the Provider and the Key Path
-          $repairArgs = @("-user", "-repairstore", "My", "$thumbprint", "$csp|$keyPath")
-          & certutil @repairArgs
+          # 4. Association via INF file (Most stable method for certutil)
+          $infPath = "$pwd/repair.inf"
+          $infContent = @"
+          [Version]
+          Signature="`$Windows NT`"
+          [Properties]
+          11 = "{text}$csp"
+          2 = "{text}$keyPath"
+          "@
+          [System.IO.File]::WriteAllText($infPath, $infContent)
+          
+          # Repair store using the INF to avoid command line parsing issues
+          certutil -user -repairstore My $thumbprint $infPath
 
           # 5. Sign Binaries
           $filesToSign = Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi", "src-tauri/target/x86_64-pc-windows-msvc/release/*.exe"
           foreach ($file in $filesToSign) {
             Write-Host "--- Signing: $($file.FullName) ---"
-            # Point signtool directly to the CSP and the Key Container (the path)
-            signtool sign /v /debug `
-              /fd sha256 `
-              /tr http://timestamp.sectigo.com `
-              /td sha256 `
-              /sha1 $thumbprint `
-              /csp "$csp" `
-              /kc "$keyPath" `
-              $file.FullName
-
-            Write-Host "--- Verifying: $($file.FullName) ---"
+            signtool sign /v /debug /fd sha256 /tr http://timestamp.sectigo.com /td sha256 /sha1 $thumbprint /csp "$csp" /kc "$keyPath" $file.FullName
             signtool verify /v /pa $file.FullName
           }
 
