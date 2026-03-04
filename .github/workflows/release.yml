@@ -91,19 +91,17 @@ jobs:
           $msi = Get-ChildItem -Path ./kms_temp -Filter "*.msi" -Recurse | Select-Object -First 1
           Start-Process msiexec.exe -ArgumentList "/i `"$($msi.FullName)`" /qn /norestart" -Wait
           
-          # Prepare the configuration file
           $configDir = "C:\Windows\KMSCNG"
           if (!(Test-Path $configDir)) { New-Item -ItemType Directory -Path $configDir -Force }
           
+          # Use raw string with `n to represent LF (0A)
           $keyPath = "${{ secrets.GCP_KMS_KEY_PATH }}".Trim().Trim('"').Trim("'")
-          $configLines = @(
-            "certificates:",
-            "  - keypath: `"$keyPath`""
-          )
+          $configRaw = "certificates:`n  - keypath: `"$keyPath`"`n"
           
-          # Write UTF-8 NO BOM (Very important for the Go parser)
-          $Utf8NoBomEncoding = New-Object System.Text.UTF8Encoding($false)
-          [System.IO.File]::WriteAllLines("$configDir\config.yaml", $configLines, $Utf8NoBomEncoding)
+          # Force binary write to ensure NO CRLF and NO BOM
+          $encoding = New-Object System.Text.UTF8Encoding($false)
+          $bytes = $encoding.GetBytes($configRaw)
+          [System.IO.File]::WriteAllBytes("$configDir\config.yaml", $bytes)
           
           echo "C:\Program Files\Google\Cloud KMS CNG Provider" >> $env:GITHUB_PATH
 
@@ -112,52 +110,29 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
 
-      - name: Sign and Verify Windows Binaries (DEBUG MODE)
+      - name: Sign and Verify Windows Binaries
         shell: pwsh
         run: |
-          # 1. Enable Verbose Provider Logging
+          # Enable Verbose Provider Logging
           $env:KMS_CNG_LOG_LEVEL = "debug"
-          $env:GRPC_VERBOSITY = "debug"
           
-          # 2. Setup Variables
           $keyPath = "${{ secrets.GCP_KMS_KEY_PATH }}".Trim().Trim('"').Trim("'")
           $csp = "Google Cloud KMS Provider"
           
-          # 3. File Integrity Check
-          Write-Host "--- DEBUG: Checking Config File ---"
-          $configPath = "C:\Windows\KMSCNG\config.yaml"
-          if (Test-Path $configPath) {
-              $content = Get-Content $configPath -Raw
-              Write-Host "File exists at $configPath"
-              Write-Host "Content Hex: $([System.BitConverter]::ToString([System.Text.Encoding]::UTF8.GetBytes($content)))"
-              Write-Host "Raw Content:"
-              Write-Host "--------------------"
-              Write-Host $content
-              Write-Host "--------------------"
-          } else {
-              Write-Error "Config file MISSING at $configPath"
-          }
-
-          # 4. Identity Detection
           $certBytes = [System.Convert]::FromBase64String("${{ secrets.SECTIGO_CERT_BASE64 }}")
           $certPath = "$pwd\sectigo_full.crt"
           [System.IO.File]::WriteAllBytes($certPath, $certBytes)
           $objCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certPath)
           $thumbprint = $objCert.Thumbprint
           
-          Write-Host "--- IDENTITY ---"
-          Write-Host "Thumbprint: $thumbprint"
-
-          # 5. Import and Associate
           Import-Certificate -FilePath $certPath -CertStoreLocation Cert:\CurrentUser\My
           
-          Write-Host "--- Executing RepairStore ---"
+          # Associating the cert with the KSP
           certutil -v -user -repairstore My $thumbprint
 
-          # 6. Attempt Sign
           $filesToSign = Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi", "src-tauri/target/x86_64-pc-windows-msvc/release/*.exe"
           foreach ($file in $filesToSign) {
-            Write-Host "--- Signing Attempt: $($file.FullName) ---"
+            Write-Host "--- Signing: $($file.FullName) ---"
             signtool sign /v /debug /fd sha256 /tr http://timestamp.sectigo.com /td sha256 /sha1 $thumbprint /csp "$csp" /kc "$keyPath" $file.FullName
             signtool verify /v /pa $file.FullName
           }
