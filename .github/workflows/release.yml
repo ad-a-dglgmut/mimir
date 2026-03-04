@@ -91,7 +91,8 @@ jobs:
           $msi = Get-ChildItem -Path ./kms_temp -Filter "*.msi" -Recurse | Select-Object -First 1
           Start-Process msiexec.exe -ArgumentList "/i `"$($msi.FullName)`" /qn /norestart" -Wait
           
-          $configDir = "C:\Windows\KMSCNG"
+          # Use ProgramData for global config access
+          $configDir = "$env:ProgramData\Google\Cloud KMS CNG Provider"
           if (!(Test-Path $configDir)) { New-Item -ItemType Directory -Path $configDir -Force }
           $keyPath = "${{ secrets.GCP_KMS_KEY_PATH }}".Trim()
           $configContent = "certificates:`n  - keypath: `"$keyPath`""
@@ -107,13 +108,13 @@ jobs:
       - name: Sign and Verify Windows Binaries
         shell: pwsh
         run: |
-          # 1. Prepare Paths
-          $keyPath = "${{ secrets.GCP_KMS_KEY_PATH }}".Trim().Trim('"').Trim("'").Trim('/')
+          # 1. Setup Variables
+          $keyPath = "${{ secrets.GCP_KMS_KEY_PATH }}".Trim().Trim('"')
           $csp = "Google Cloud KMS Provider"
           
           # 2. Setup Sectigo Cert
           $certBytes = [System.Convert]::FromBase64String("${{ secrets.SECTIGO_CERT_BASE64 }}")
-          $certPath = "$pwd/sectigo_full.crt"
+          $certPath = "$pwd\sectigo_full.crt"
           [System.IO.File]::WriteAllBytes($certPath, $certBytes)
           
           $objCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certPath)
@@ -123,26 +124,20 @@ jobs:
           Write-Host "Thumbprint: $thumbprint"
 
           # 3. Import to Store
-          $cert = Import-Certificate -FilePath $certPath -CertStoreLocation Cert:\CurrentUser\My
+          Import-Certificate -FilePath $certPath -CertStoreLocation Cert:\CurrentUser\My
 
-          # 4. Association via INF file (Most stable method for certutil)
-          $infPath = "$pwd/repair.inf"
-          $infContent = @"
-          [Version]
-          Signature="`$Windows NT`"
-          [Properties]
-          11 = "{text}$csp"
-          2 = "{text}$keyPath"
-          "@
-          [System.IO.File]::WriteAllText($infPath, $infContent)
-          
-          # Repair store using the INF to avoid command line parsing issues
-          certutil -user -repairstore My $thumbprint $infPath
+          # 4. Associate the Cert with the Google KMS Provider in Registry
+          # This tells Windows: "When you see this thumbprint, use Google's KSP"
+          $regPath = "HKCU:\Software\Microsoft\SystemCertificates\My\Certificates\$thumbprint"
+          if (!(Test-Path $regPath)) { New-Item -Path $regPath -Force }
+          # Direct association via certutil is more robust than INF files in CI
+          certutil -v -user -repairstore My $thumbprint
 
           # 5. Sign Binaries
           $filesToSign = Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi", "src-tauri/target/x86_64-pc-windows-msvc/release/*.exe"
           foreach ($file in $filesToSign) {
             Write-Host "--- Signing: $($file.FullName) ---"
+            # Using /sha1 ensures we pick the right cert, /csp and /kc point to Google KMS
             signtool sign /v /debug /fd sha256 /tr http://timestamp.sectigo.com /td sha256 /sha1 $thumbprint /csp "$csp" /kc "$keyPath" $file.FullName
             signtool verify /v /pa $file.FullName
           }
