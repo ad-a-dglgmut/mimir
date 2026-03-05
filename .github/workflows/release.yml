@@ -61,7 +61,7 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 20 }
       - uses: dtolnay/rust-toolchain@stable
-      
+
       - name: Add Signtool to PATH
         shell: pwsh
         run: |
@@ -91,17 +91,17 @@ jobs:
           Expand-Archive -Path kms-cng.zip -DestinationPath ./kms_temp -Force
           $msi = Get-ChildItem -Path ./kms_temp -Filter "*.msi" -Recurse | Select-Object -First 1
           Start-Process msiexec.exe -ArgumentList "/i `"$($msi.FullName)`" /qn /norestart" -Wait
-          
+
           $configDir = "C:\Windows\KMSCNG"
           if (!(Test-Path $configDir)) { New-Item -ItemType Directory -Path $configDir -Force }
-          
+
           $keyPath = "${{ secrets.GCP_KMS_KEY_PATH }}".Trim().Trim('"').Trim("'")
           $configRaw = "resources:`n  - crypto_key_version: `"$keyPath`"`n"
-          
+
           $encoding = New-Object System.Text.UTF8Encoding($false)
           $bytes = $encoding.GetBytes($configRaw)
           [System.IO.File]::WriteAllBytes("$configDir\config.yaml", $bytes)
-          
+
           icacls "$configDir" /grant "Everyone:(OI)(CI)F" /T
           echo "C:\Program Files\Google\Cloud KMS CNG Provider" >> $env:GITHUB_PATH
 
@@ -115,36 +115,65 @@ jobs:
         run: |
           $env:KMS_CNG_LOG_LEVEL = "debug"
           $env:KMS_CNG_CONFIG = "C:\Windows\KMSCNG\config.yaml"
-          
+
           $keyPath = "${{ secrets.GCP_KMS_KEY_PATH }}".Trim().Trim('"').Trim("'")
           $csp = "Google Cloud KMS CNG Provider"
-          
-          # 1. Load Certificate and Import
+
+          # 1. Load Certificate
           $certBytes = [System.Convert]::FromBase64String("${{ secrets.SECTIGO_CERT_BASE64 }}")
           $certPath = "$pwd\sectigo_full.crt"
           [System.IO.File]::WriteAllBytes($certPath, $certBytes)
-          Import-Certificate -FilePath $certPath -CertStoreLocation Cert:\CurrentUser\My
-          
-          $objCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certPath)
-          $thumbprint = $objCert.Thumbprint
 
-          # 2. Direct Registry Association
-          # This links the thumbprint directly to the GCP KMS Provider & Key Path
-          certutil -user -setreg "Cert\CurrentUser\My\$thumbprint\Key Provider" "$csp"
-          certutil -user -setreg "Cert\CurrentUser\My\$thumbprint\Key Container" "$keyPath"
+          # 2. Parse cert and get thumbprint
+          $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certPath)
+          $thumbprint = $cert.Thumbprint
+          Write-Host "Certificate thumbprint: $thumbprint"
 
-          # 3. Final Signing Loop
+          # 3. Import cert into CurrentUser\My store
+          $store = New-Object System.Security.Cryptography.X509Certificates.X509Store("My", "CurrentUser")
+          $store.Open("ReadWrite")
+          $store.Add($cert)
+          $store.Close()
+          Write-Host "Certificate imported into CurrentUser\My store"
+
+          # 4. Use certutil -repairstore to link private key from KMS CNG provider
+          Write-Host "Linking certificate to KMS CNG provider via repairstore..."
+          $repairResult = certutil -user -repairstore My $thumbprint "$csp" "$keyPath"
+          Write-Host $repairResult
+
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "repairstore failed, attempting fallback importpfx method..."
+            certutil -user -importpfx -csp "$csp" My $certPath
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "❌ Both linking methods failed. Check CSP name and key path."
+              exit 1
+            }
+          }
+
+          # 5. Verify the cert now has a private key
+          $store = New-Object System.Security.Cryptography.X509Certificates.X509Store("My", "CurrentUser")
+          $store.Open("ReadOnly")
+          $linkedCert = $store.Certificates | Where-Object { $_.Thumbprint -eq $thumbprint }
+          $store.Close()
+
+          if ($linkedCert.HasPrivateKey) {
+            Write-Host "✅ Certificate successfully linked to private key"
+          } else {
+            Write-Error "❌ Certificate still has no private key after linking attempt"
+            exit 1
+          }
+
+          # 6. Sign all MSI and EXE files
           $tsUrl = "http://timestamp.sectigo.com/rfc3161"
           $filesToSign = Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi", "src-tauri/target/x86_64-pc-windows-msvc/release/*.exe"
-          
+
           foreach ($file in $filesToSign) {
             Write-Host "--- Signing: $($file.FullName) ---"
-            # Explicitly passing /csp and /kc is the most stable way for Cloud KMS
             signtool sign /v /debug /fd sha256 /tr "$tsUrl" /td sha256 /sha1 $thumbprint /csp "$csp" /kc "$keyPath" $file.FullName
-            
-            if ($LASTEXITCODE -ne 0) { 
-              Write-Error "Signing failed. Check GCP IAM roles (Signer/Verifier) and Key Path."
-              exit 1 
+
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "Signing failed. Check GCP IAM roles (cloudkms.signerVerifier) and Key Path."
+              exit 1
             }
             signtool verify /v /pa $file.FullName
             Start-Sleep -Seconds 2
