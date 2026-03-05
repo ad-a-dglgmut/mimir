@@ -52,6 +52,8 @@ jobs:
         uses: 'google-github-actions/auth@v2'
         with:
           credentials_json: '${{ secrets.GCP_KMS_SERVICE_ACCOUNT_KEY }}'
+          # CRITICAL: This ensures GOOGLE_APPLICATION_CREDENTIALS is set for the whole runner
+          export_environment_variables: true
 
       - name: Extract version
         id: extract_version
@@ -85,29 +87,25 @@ jobs:
       - name: Install Google Cloud KMS CNG Provider
         shell: pwsh
         run: |
-          # Use Verified v1.3 URL
           $url = "https://github.com/GoogleCloudPlatform/kms-integrations/releases/download/cng-v1.3/kmscng-1.3-windows-amd64.zip"
           Invoke-WebRequest -Uri $url -OutFile kms-cng.zip
           Expand-Archive -Path kms-cng.zip -DestinationPath ./kms_temp -Force
           $msi = Get-ChildItem -Path ./kms_temp -Filter "*.msi" -Recurse | Select-Object -First 1
           Start-Process msiexec.exe -ArgumentList "/i `"$($msi.FullName)`" /qn /norestart" -Wait
           
-          # Setup Config Directory
           $configDir = "C:\Windows\KMSCNG"
           if (!(Test-Path $configDir)) { New-Item -ItemType Directory -Path $configDir -Force }
           
           $keyPath = "${{ secrets.GCP_KMS_KEY_PATH }}".Trim().Trim('"').Trim("'")
-          
-          # v1.3 REQUIRED SCHEMA: Use 'resources' and 'crypto_key_version'
           $configRaw = "resources:`n  - crypto_key_version: `"$keyPath`"`n"
           
-          # Write UTF-8 without BOM
           $encoding = New-Object System.Text.UTF8Encoding($false)
           $bytes = $encoding.GetBytes($configRaw)
           [System.IO.File]::WriteAllBytes("$configDir\config.yaml", $bytes)
           
-          # Inform the system where the config is
-          [Environment]::SetEnvironmentVariable("KMS_CNG_CONFIG", "$configDir\config.yaml", "Machine")
+          # Fix local folder permissions
+          icacls "$configDir" /grant "Everyone:(OI)(CI)F" /T
+          
           echo "C:\Program Files\Google\Cloud KMS CNG Provider" >> $env:GITHUB_PATH
 
       - name: Build App
@@ -118,34 +116,42 @@ jobs:
       - name: Sign and Verify Windows Binaries
         shell: pwsh
         run: |
+          # Ensure driver knows where config is
           $env:KMS_CNG_LOG_LEVEL = "debug"
           $env:KMS_CNG_LOG_TO_STDERR = "true"
           $env:KMS_CNG_CONFIG = "C:\Windows\KMSCNG\config.yaml"
           
           $keyPath = "${{ secrets.GCP_KMS_KEY_PATH }}".Trim().Trim('"').Trim("'")
-          $csp = "Google Cloud KMS Provider"
           
-          # Load and detect certificate
+          # Setup Certificate
           $certBytes = [System.Convert]::FromBase64String("${{ secrets.SECTIGO_CERT_BASE64 }}")
           $certPath = "$pwd\sectigo_full.crt"
           [System.IO.File]::WriteAllBytes($certPath, $certBytes)
           $objCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certPath)
           $thumbprint = $objCert.Thumbprint
           
-          # Import to user store and repair
+          Write-Host "--- Linking Cert to Google KMS ---"
           Import-Certificate -FilePath $certPath -CertStoreLocation Cert:\CurrentUser\My
+          
+          # Repair association (This triggers the GCP auth check)
           certutil -v -user -repairstore My $thumbprint
-
-          # Use specific Sectigo RFC3161 endpoint
+          
+          Write-Host "--- Verifying Association Metadata ---"
+          # If this shows "Provider = Google Cloud KMS Provider", the link is solid.
+          certutil -v -user -store My $thumbprint
+          
           $tsUrl = "http://timestamp.sectigo.com/rfc3161"
-
           $filesToSign = Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi", "src-tauri/target/x86_64-pc-windows-msvc/release/*.exe"
+          
           foreach ($file in $filesToSign) {
             Write-Host "--- Signing: $($file.FullName) ---"
-            signtool sign /v /debug /fd sha256 /tr "$tsUrl" /td sha256 /sha1 $thumbprint /csp "$csp" /kc "$keyPath" $file.FullName
-            signtool verify /v /pa $file.FullName
+            signtool sign /v /debug /fd sha256 /tr "$tsUrl" /td sha256 /sha1 $thumbprint /csp "Google Cloud KMS Provider" /kc "$keyPath" $file.FullName
             
-            Write-Host "Waiting 5s for timestamp server..."
+            if ($LASTEXITCODE -ne 0) { 
+                Write-Error "Signing failed. Check if GCP IAM role is 'Cloud KMS Crypto Operator'."
+                exit 1 
+            }
+            signtool verify /v /pa $file.FullName
             Start-Sleep -Seconds 5
           }
 
