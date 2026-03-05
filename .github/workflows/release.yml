@@ -91,14 +91,16 @@ jobs:
           $msi = Get-ChildItem -Path ./kms_temp -Filter "*.msi" -Recurse | Select-Object -First 1
           Start-Process msiexec.exe -ArgumentList "/i `"$($msi.FullName)`" /qn /norestart" -Wait
           
+          # Setup Config Directory
           $configDir = "C:\Windows\KMSCNG"
           if (!(Test-Path $configDir)) { New-Item -ItemType Directory -Path $configDir -Force }
           
-          # Use raw string with `n to represent LF (0A)
           $keyPath = "${{ secrets.GCP_KMS_KEY_PATH }}".Trim().Trim('"').Trim("'")
-          $configRaw = "certificates:`n  - keypath: `"$keyPath`"`n"
           
-          # Force binary write to ensure NO CRLF and NO BOM
+          # Force LF line endings and use kms_certificates key
+          $configRaw = "kms_certificates:`n  - keypath: `"$keyPath`"`n"
+          
+          # Binary write to ensure NO BOM and NO CRLF
           $encoding = New-Object System.Text.UTF8Encoding($false)
           $bytes = $encoding.GetBytes($configRaw)
           [System.IO.File]::WriteAllBytes("$configDir\config.yaml", $bytes)
@@ -113,23 +115,28 @@ jobs:
       - name: Sign and Verify Windows Binaries
         shell: pwsh
         run: |
-          # Enable Verbose Provider Logging
+          # Force debug logs to show up in GitHub Actions console
           $env:KMS_CNG_LOG_LEVEL = "debug"
+          $env:KMS_CNG_LOG_TO_STDERR = "true"
           
           $keyPath = "${{ secrets.GCP_KMS_KEY_PATH }}".Trim().Trim('"').Trim("'")
           $csp = "Google Cloud KMS Provider"
           
+          # Load and detect certificate
           $certBytes = [System.Convert]::FromBase64String("${{ secrets.SECTIGO_CERT_BASE64 }}")
           $certPath = "$pwd\sectigo_full.crt"
           [System.IO.File]::WriteAllBytes($certPath, $certBytes)
           $objCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certPath)
           $thumbprint = $objCert.Thumbprint
           
+          # Import to user store
           Import-Certificate -FilePath $certPath -CertStoreLocation Cert:\CurrentUser\My
           
-          # Associating the cert with the KSP
+          # Use certutil to link the cert to the KSP
+          Write-Host "--- Linking Certificate to Google KMS Provider ---"
           certutil -v -user -repairstore My $thumbprint
 
+          # Sign MSI and EXE
           $filesToSign = Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi", "src-tauri/target/x86_64-pc-windows-msvc/release/*.exe"
           foreach ($file in $filesToSign) {
             Write-Host "--- Signing: $($file.FullName) ---"
