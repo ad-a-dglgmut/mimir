@@ -124,30 +124,38 @@ jobs:
           $certPath = "$pwd\sectigo_full.crt"
           [System.IO.File]::WriteAllBytes($certPath, $certBytes)
 
-          # 2. Parse cert and get thumbprint
           $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certPath)
           $thumbprint = $cert.Thumbprint
           Write-Host "Certificate thumbprint: $thumbprint"
 
-          # 3. Import cert into CurrentUser\My store
+          # 2. Import cert into CurrentUser\My store
           $store = New-Object System.Security.Cryptography.X509Certificates.X509Store("My", "CurrentUser")
           $store.Open("ReadWrite")
           $store.Add($cert)
           $store.Close()
           Write-Host "Certificate imported into CurrentUser\My store"
 
-          # 4. Use certutil -repairstore to link private key from KMS CNG provider
-          Write-Host "Linking certificate to KMS CNG provider via repairstore..."
-          $repairResult = certutil -user -repairstore My $thumbprint "$csp" "$keyPath"
-          Write-Host $repairResult
+          # 3. Build a Property INF file to link the KMS private key (property 2 = Key Provider Info)
+          $infContent = @"
+          [Version]
+          Signature="`$Windows NT`$"
 
+          [Properties]
+          2 = "***text***Container=$keyPath&Provider=$csp&ProviderType=0&Flags=32&KeySpec=0"
+          "@
+          $infPath = "$pwd\kms_link.inf"
+          $encoding = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::WriteAllText($infPath, $infContent, $encoding)
+          Write-Host "INF file written to $infPath"
+          Write-Host "INF contents:"
+          Get-Content $infPath
+
+          # 4. Run repairstore with the INF file
+          Write-Host "Linking certificate to KMS CNG provider via repairstore..."
+          certutil -user -repairstore My $thumbprint $infPath
           if ($LASTEXITCODE -ne 0) {
-            Write-Host "repairstore failed, attempting fallback importpfx method..."
-            certutil -user -importpfx -csp "$csp" My $certPath
-            if ($LASTEXITCODE -ne 0) {
-              Write-Error "❌ Both linking methods failed. Check CSP name and key path."
-              exit 1
-            }
+            Write-Error "❌ certutil -repairstore failed."
+            exit 1
           }
 
           # 5. Verify the cert now has a private key
@@ -159,7 +167,7 @@ jobs:
           if ($linkedCert.HasPrivateKey) {
             Write-Host "✅ Certificate successfully linked to private key"
           } else {
-            Write-Error "❌ Certificate still has no private key after linking attempt"
+            Write-Error "❌ Certificate still has no private key. Check KMS provider name and key path."
             exit 1
           }
 
