@@ -114,13 +114,12 @@ jobs:
         shell: pwsh
         run: |
           $env:KMS_CNG_LOG_LEVEL = "debug"
-          $env:KMS_CNG_LOG_TO_STDERR = "true"
           $env:KMS_CNG_CONFIG = "C:\Windows\KMSCNG\config.yaml"
           
           $keyPath = "${{ secrets.GCP_KMS_KEY_PATH }}".Trim().Trim('"').Trim("'")
-          $csp = "Google Cloud KMS Provider"
+          $csp = "Google Cloud KMS CNG Provider"
           
-          # 1. Load Certificate
+          # 1. Load Certificate and Import
           $certBytes = [System.Convert]::FromBase64String("${{ secrets.SECTIGO_CERT_BASE64 }}")
           $certPath = "$pwd\sectigo_full.crt"
           [System.IO.File]::WriteAllBytes($certPath, $certBytes)
@@ -129,29 +128,26 @@ jobs:
           $objCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certPath)
           $thumbprint = $objCert.Thumbprint
 
-          # 2. FORCE CNG ASSOCIATION (Fixes "unsupported legacy key spec")
-          $repairFile = "repair.txt"
-          "Target = `"$csp`"`nKeyContainer = `"$keyPath`"`nProviderType = 0`nFlags = 0x20" | Out-File -FilePath $repairFile -Encoding ascii
-          certutil -v -user -repairstore My $thumbprint $repairFile
+          # 2. Direct Registry Association
+          # This links the thumbprint directly to the GCP KMS Provider & Key Path
+          certutil -user -setreg "Cert\CurrentUser\My\$thumbprint\Key Provider" "$csp"
+          certutil -user -setreg "Cert\CurrentUser\My\$thumbprint\Key Container" "$keyPath"
 
-          # 3. VERIFY
-          Write-Host "--- Verifying Link ---"
-          certutil -v -user -silent -store My $thumbprint
-          
+          # 3. Final Signing Loop
           $tsUrl = "http://timestamp.sectigo.com/rfc3161"
           $filesToSign = Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi", "src-tauri/target/x86_64-pc-windows-msvc/release/*.exe"
           
           foreach ($file in $filesToSign) {
             Write-Host "--- Signing: $($file.FullName) ---"
-            # Using thumbprint for selection + CSP/KC for the provider link
+            # Explicitly passing /csp and /kc is the most stable way for Cloud KMS
             signtool sign /v /debug /fd sha256 /tr "$tsUrl" /td sha256 /sha1 $thumbprint /csp "$csp" /kc "$keyPath" $file.FullName
             
             if ($LASTEXITCODE -ne 0) { 
-              Write-Error "Signing failed. This is likely due to the handshake between Windows and GCP. Check logs for SECURITY_STATUS codes."
+              Write-Error "Signing failed. Check GCP IAM roles (Signer/Verifier) and Key Path."
               exit 1 
             }
             signtool verify /v /pa $file.FullName
-            Start-Sleep -Seconds 5
+            Start-Sleep -Seconds 2
           }
 
       - name: Upload Windows Artifacts
