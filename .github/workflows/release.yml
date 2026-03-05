@@ -83,7 +83,7 @@ jobs:
           $tauriConf | ConvertTo-Json -Depth 10 | Set-Content "src-tauri/tauri.conf.json"
           (Get-Content src-tauri/Cargo.toml) -replace '^version = ".*"', 'version = "${{ steps.extract_version.outputs.version }}"' | Set-Content src-tauri/Cargo.toml
 
-      - name: Install Google Cloud KMS CNG Provider
+      - name: Install Google Cloud KMS Provider
         shell: pwsh
         run: |
           $url = "https://github.com/GoogleCloudPlatform/kms-integrations/releases/download/cng-v1.3/kmscng-1.3-windows-amd64.zip"
