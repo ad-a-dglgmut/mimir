@@ -83,16 +83,22 @@ jobs:
           $tauriConf | ConvertTo-Json -Depth 10 | Set-Content "src-tauri/tauri.conf.json"
           (Get-Content src-tauri/Cargo.toml) -replace '^version = ".*"', 'version = "${{ steps.extract_version.outputs.version }}"' | Set-Content src-tauri/Cargo.toml
 
-      - name: Install Google Cloud KMS Provider
+      - name: Install Google Cloud KMS CNG Provider
         shell: pwsh
         run: |
           $url = "https://github.com/GoogleCloudPlatform/kms-integrations/releases/download/cng-v1.3/kmscng-1.3-windows-amd64.zip"
           Invoke-WebRequest -Uri $url -OutFile kms-cng.zip
           Expand-Archive -Path kms-cng.zip -DestinationPath ./kms_temp -Force
           $msi = Get-ChildItem -Path ./kms_temp -Filter "*.msi" -Recurse | Select-Object -First 1
-          Start-Process msiexec.exe -ArgumentList "/i `"$($msi.FullName)`" /qn /norestart" -Wait
+          Write-Host "Installing MSI: $($msi.FullName)"
+          $installResult = Start-Process msiexec.exe -ArgumentList "/i `"$($msi.FullName)`" /qn /norestart /l*v msi_install.log" -Wait -PassThru
+          Write-Host "MSI exit code: $($installResult.ExitCode)"
+          if (Test-Path msi_install.log) { Get-Content msi_install.log | Select-Object -Last 30 }
+          if ($installResult.ExitCode -ne 0 -and $installResult.ExitCode -ne 3010) {
+            Write-Error "MSI install failed with exit code $($installResult.ExitCode)"
+            exit 1
+          }
 
-          # Wait for provider to register
           Start-Sleep -Seconds 5
 
           $configDir = "C:\Windows\KMSCNG"
@@ -108,9 +114,8 @@ jobs:
           icacls "$configDir" /grant "Everyone:(OI)(CI)F" /T
           echo "C:\Program Files\Google\Cloud KMS CNG Provider" >> $env:GITHUB_PATH
 
-          # Verify provider is registered
-          Write-Host "=== Registered CNG Providers ==="
-          certutil -csplist | Select-String -Pattern "Google|KMS" -Context 0,1
+          Write-Host "=== Registered CNG Providers (raw) ==="
+          certutil -csplist 2>&1 | ForEach-Object { Write-Host $_ }
 
       - name: Build App
         run: npm install && npm run build && npx tauri build --target x86_64-pc-windows-msvc
@@ -120,28 +125,23 @@ jobs:
       - name: Sign and Verify Windows Binaries
         shell: pwsh
         run: |
-          # --- Diagnostics ---
+          $env:KMS_CNG_LOG_LEVEL = "debug"
+          $env:KMS_CNG_CONFIG = "C:\Windows\KMSCNG\config.yaml"
+
+          $keyPath = "${{ secrets.GCP_KMS_KEY_PATH }}".Trim().Trim('"').Trim("'")
+          $csp = "Google Cloud KMS Provider"
+
           Write-Host "=== GOOGLE_APPLICATION_CREDENTIALS ==="
           Write-Host $env:GOOGLE_APPLICATION_CREDENTIALS
           if (Test-Path $env:GOOGLE_APPLICATION_CREDENTIALS) {
             Write-Host "✅ Credentials file exists"
           } else {
-            Write-Error "❌ Credentials file NOT found - this is likely the problem"
+            Write-Error "❌ Credentials file NOT found"
             exit 1
           }
 
-          Write-Host "=== Registered CNG Providers ==="
-          certutil -csplist | Select-String -Pattern "Google|KMS" -Context 0,1
-
           Write-Host "=== KMSCNG config ==="
           Get-Content "C:\Windows\KMSCNG\config.yaml"
-
-          # --- Setup ---
-          $env:KMS_CNG_LOG_LEVEL = "debug"
-          $env:KMS_CNG_CONFIG = "C:\Windows\KMSCNG\config.yaml"
-
-          $keyPath = "${{ secrets.GCP_KMS_KEY_PATH }}".Trim().Trim('"').Trim("'")
-          $csp = "Google Cloud KMS CNG Provider"
 
           Write-Host "=== Key Path ==="
           Write-Host $keyPath
