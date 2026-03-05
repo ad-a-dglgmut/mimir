@@ -85,7 +85,8 @@ jobs:
       - name: Install Google Cloud KMS CNG Provider
         shell: pwsh
         run: |
-          $url = "https://github.com/GoogleCloudPlatform/kms-integrations/releases/download/cng-v1.6/kmscng-v1.6-windows-amd64.zip"
+          # Use Verified v1.3 URL
+          $url = "https://github.com/GoogleCloudPlatform/kms-integrations/releases/download/cng-v1.3/kmscng-1.3-windows-amd64.zip"
           Invoke-WebRequest -Uri $url -OutFile kms-cng.zip
           Expand-Archive -Path kms-cng.zip -DestinationPath ./kms_temp -Force
           $msi = Get-ChildItem -Path ./kms_temp -Filter "*.msi" -Recurse | Select-Object -First 1
@@ -97,14 +98,16 @@ jobs:
           
           $keyPath = "${{ secrets.GCP_KMS_KEY_PATH }}".Trim().Trim('"').Trim("'")
           
-          # Force LF line endings and use kms_certificates key
-          $configRaw = "kms_certificates:`n  - keypath: `"$keyPath`"`n"
+          # v1.3 REQUIRED SCHEMA: Use 'resources' and 'crypto_key_version'
+          $configRaw = "resources:`n  - crypto_key_version: `"$keyPath`"`n"
           
-          # Binary write to ensure NO BOM and NO CRLF
+          # Write UTF-8 without BOM
           $encoding = New-Object System.Text.UTF8Encoding($false)
           $bytes = $encoding.GetBytes($configRaw)
           [System.IO.File]::WriteAllBytes("$configDir\config.yaml", $bytes)
           
+          # Inform the system where the config is
+          [Environment]::SetEnvironmentVariable("KMS_CNG_CONFIG", "$configDir\config.yaml", "Machine")
           echo "C:\Program Files\Google\Cloud KMS CNG Provider" >> $env:GITHUB_PATH
 
       - name: Build App
@@ -115,9 +118,9 @@ jobs:
       - name: Sign and Verify Windows Binaries
         shell: pwsh
         run: |
-          # Force debug logs to show up in GitHub Actions console
           $env:KMS_CNG_LOG_LEVEL = "debug"
           $env:KMS_CNG_LOG_TO_STDERR = "true"
+          $env:KMS_CNG_CONFIG = "C:\Windows\KMSCNG\config.yaml"
           
           $keyPath = "${{ secrets.GCP_KMS_KEY_PATH }}".Trim().Trim('"').Trim("'")
           $csp = "Google Cloud KMS Provider"
@@ -129,19 +132,21 @@ jobs:
           $objCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certPath)
           $thumbprint = $objCert.Thumbprint
           
-          # Import to user store
+          # Import to user store and repair
           Import-Certificate -FilePath $certPath -CertStoreLocation Cert:\CurrentUser\My
-          
-          # Use certutil to link the cert to the KSP
-          Write-Host "--- Linking Certificate to Google KMS Provider ---"
           certutil -v -user -repairstore My $thumbprint
 
-          # Sign MSI and EXE
+          # Use specific Sectigo RFC3161 endpoint
+          $tsUrl = "http://timestamp.sectigo.com/rfc3161"
+
           $filesToSign = Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi", "src-tauri/target/x86_64-pc-windows-msvc/release/*.exe"
           foreach ($file in $filesToSign) {
             Write-Host "--- Signing: $($file.FullName) ---"
-            signtool sign /v /debug /fd sha256 /tr http://timestamp.sectigo.com /td sha256 /sha1 $thumbprint /csp "$csp" /kc "$keyPath" $file.FullName
+            signtool sign /v /debug /fd sha256 /tr "$tsUrl" /td sha256 /sha1 $thumbprint /csp "$csp" /kc "$keyPath" $file.FullName
             signtool verify /v /pa $file.FullName
+            
+            Write-Host "Waiting 5s for timestamp server..."
+            Start-Sleep -Seconds 5
           }
 
       - name: Upload Windows Artifacts
