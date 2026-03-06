@@ -94,23 +94,38 @@ jobs:
           # Download jsign
           Invoke-WebRequest -Uri "https://github.com/ebourg/jsign/releases/download/6.0/jsign-6.0.jar" -OutFile jsign.jar
 
-          # Write credentials file
-          $credsJson = '${{ secrets.GCP_KMS_SERVICE_ACCOUNT_KEY }}'
-          $credsPath = "C:\gcp_creds.json"
-          [System.IO.File]::WriteAllText($credsPath, $credsJson)
-          $env:GOOGLE_APPLICATION_CREDENTIALS = $credsPath
-
-          # Generate OAuth2 access token from service account JSON using gcloud
+          # Load service account credentials
+          $credsPath = $env:GOOGLE_APPLICATION_CREDENTIALS
+          Write-Host "Using credentials from: $credsPath"
           $creds = Get-Content $credsPath | ConvertFrom-Json
           Write-Host "Service account: $($creds.client_email)"
 
-          # Install gcloud if not present, then get access token
-          $accessToken = (gcloud auth print-access-token --quiet 2>$null)
-          if (-not $accessToken) {
-            Write-Host "gcloud not authenticated, activating service account..."
-            gcloud auth activate-service-account --key-file="$credsPath" --quiet
-            $accessToken = (gcloud auth print-access-token --quiet)
-          }
+          # Generate OAuth2 access token via JWT using the service account private key
+          # 1. Build JWT header and claims
+          $now = [int][double]::Parse((Get-Date -UFormat %s))
+          $exp = $now + 3600
+          $scope = "https://www.googleapis.com/auth/cloudkms"
+
+          $header = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('{"alg":"RS256","typ":"JWT"}')) -replace '=+$','' -replace '\+','-' -replace '/','_'
+          $claims = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("{`"iss`":`"$($creds.client_email)`",`"scope`":`"$scope`",`"aud`":`"https://oauth2.googleapis.com/token`",`"exp`":$exp,`"iat`":$now}")) -replace '=+$','' -replace '\+','-' -replace '/','_'
+
+          $toSign = "$header.$claims"
+
+          # 2. Sign JWT with RSA-SHA256 using the private key from the JSON
+          $rsaKey = [System.Security.Cryptography.RSA]::Create()
+          $privateKeyPem = $creds.private_key -replace "-----BEGIN PRIVATE KEY-----",'' -replace "-----END PRIVATE KEY-----",'' -replace "`n",'' -replace "`r",''
+          $privateKeyBytes = [Convert]::FromBase64String($privateKeyPem)
+          $rsaKey.ImportPkcs8PrivateKey($privateKeyBytes, [ref]$null)
+
+          $toSignBytes = [Text.Encoding]::UTF8.GetBytes($toSign)
+          $signatureBytes = $rsaKey.SignData($toSignBytes, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+          $signature = [Convert]::ToBase64String($signatureBytes) -replace '=+$','' -replace '\+','-' -replace '/','_'
+
+          $jwt = "$toSign.$signature"
+
+          # 3. Exchange JWT for access token
+          $tokenResponse = Invoke-RestMethod -Uri "https://oauth2.googleapis.com/token" -Method POST -ContentType "application/x-www-form-urlencoded" -Body "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=$jwt"
+          $accessToken = $tokenResponse.access_token
 
           if (-not $accessToken) {
             Write-Error "❌ Failed to get access token"
