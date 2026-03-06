@@ -91,9 +91,8 @@ jobs:
           Expand-Archive -Path kms-cng.zip -DestinationPath ./kms_temp -Force
           $msi = Get-ChildItem -Path ./kms_temp -Filter "*.msi" -Recurse | Select-Object -First 1
           Write-Host "Installing MSI: $($msi.FullName)"
-          $installResult = Start-Process msiexec.exe -ArgumentList "/i `"$($msi.FullName)`" /qn /norestart /l*v msi_install.log" -Wait -PassThru
+          $installResult = Start-Process msiexec.exe -ArgumentList "/i `"$($msi.FullName)`" /qn /norestart" -Wait -PassThru
           Write-Host "MSI exit code: $($installResult.ExitCode)"
-          if (Test-Path msi_install.log) { Get-Content msi_install.log | Select-Object -Last 30 }
           if ($installResult.ExitCode -ne 0 -and $installResult.ExitCode -ne 3010) {
             Write-Error "MSI install failed with exit code $($installResult.ExitCode)"
             exit 1
@@ -114,9 +113,6 @@ jobs:
           icacls "$configDir" /grant "Everyone:(OI)(CI)F" /T
           echo "C:\Program Files\Google\Cloud KMS CNG Provider" >> $env:GITHUB_PATH
 
-          Write-Host "=== Registered CNG Providers (raw) ==="
-          certutil -csplist 2>&1 | ForEach-Object { Write-Host $_ }
-
       - name: Build App
         run: npm install && npm run build && npx tauri build --target x86_64-pc-windows-msvc
         env:
@@ -125,20 +121,26 @@ jobs:
       - name: Sign and Verify Windows Binaries
         shell: pwsh
         run: |
+          # Explicitly write credentials to a file and set env var
+          # google-github-actions/auth may not persist GOOGLE_APPLICATION_CREDENTIALS
+          # into subprocesses like signtool reliably
+          $credsJson = '${{ secrets.GCP_KMS_SERVICE_ACCOUNT_KEY }}'
+          $credsPath = "$pwd\gcp_creds.json"
+          [System.IO.File]::WriteAllText($credsPath, $credsJson)
+          $env:GOOGLE_APPLICATION_CREDENTIALS = $credsPath
+
+          # Also set for any child processes
+          [System.Environment]::SetEnvironmentVariable("GOOGLE_APPLICATION_CREDENTIALS", $credsPath, "Process")
+
+          Write-Host "=== GOOGLE_APPLICATION_CREDENTIALS ==="
+          Write-Host $env:GOOGLE_APPLICATION_CREDENTIALS
+          Write-Host "Credentials file exists: $(Test-Path $credsPath)"
+
           $env:KMS_CNG_LOG_LEVEL = "debug"
           $env:KMS_CNG_CONFIG = "C:\Windows\KMSCNG\config.yaml"
 
           $keyPath = "${{ secrets.GCP_KMS_KEY_PATH }}".Trim().Trim('"').Trim("'")
           $csp = "Google Cloud KMS Provider"
-
-          Write-Host "=== GOOGLE_APPLICATION_CREDENTIALS ==="
-          Write-Host $env:GOOGLE_APPLICATION_CREDENTIALS
-          if (Test-Path $env:GOOGLE_APPLICATION_CREDENTIALS) {
-            Write-Host "✅ Credentials file exists"
-          } else {
-            Write-Error "❌ Credentials file NOT found"
-            exit 1
-          }
 
           Write-Host "=== KMSCNG config ==="
           Get-Content "C:\Windows\KMSCNG\config.yaml"
