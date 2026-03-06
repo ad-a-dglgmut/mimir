@@ -94,18 +94,31 @@ jobs:
           # Download jsign
           Invoke-WebRequest -Uri "https://github.com/ebourg/jsign/releases/download/6.0/jsign-6.0.jar" -OutFile jsign.jar
 
-          # Write credentials
+          # Write credentials file
           $credsJson = '${{ secrets.GCP_KMS_SERVICE_ACCOUNT_KEY }}'
           $credsPath = "C:\gcp_creds.json"
           [System.IO.File]::WriteAllText($credsPath, $credsJson)
+          $env:GOOGLE_APPLICATION_CREDENTIALS = $credsPath
 
-          # Debug service account
+          # Generate OAuth2 access token from service account JSON using gcloud
           $creds = Get-Content $credsPath | ConvertFrom-Json
-          Write-Host "Service account email: $($creds.client_email)"
-          Write-Host "Project: $($creds.project_id)"
+          Write-Host "Service account: $($creds.client_email)"
+
+          # Install gcloud if not present, then get access token
+          $accessToken = (gcloud auth print-access-token --quiet 2>$null)
+          if (-not $accessToken) {
+            Write-Host "gcloud not authenticated, activating service account..."
+            gcloud auth activate-service-account --key-file="$credsPath" --quiet
+            $accessToken = (gcloud auth print-access-token --quiet)
+          }
+
+          if (-not $accessToken) {
+            Write-Error "❌ Failed to get access token"
+            exit 1
+          }
+          Write-Host "✅ Got access token"
 
           # Parse key path into components
-          # Expected format: projects/PROJECT/locations/LOCATION/keyRings/RING/cryptoKeys/KEY/cryptoKeyVersions/VERSION
           $keyPath = "${{ secrets.GCP_KMS_KEY_PATH }}".Trim().Trim('"').Trim("'")
           $parts = $keyPath -split "/"
           $projectId = $parts[1]
@@ -113,14 +126,9 @@ jobs:
           $keyRing   = $parts[5]
           $keyName   = $parts[7]
 
-          Write-Host "Project:  $projectId"
-          Write-Host "Location: $location"
-          Write-Host "KeyRing:  $keyRing"
-          Write-Host "Key:      $keyName"
-
-          # jsign keystore must be: projects/PROJECT/locations/LOCATION/keyRings/RING
           $keystore = "projects/$projectId/locations/$location/keyRings/$keyRing"
           Write-Host "Keystore: $keystore"
+          Write-Host "Key:      $keyName"
 
           # Write cert to file
           $certBytes = [System.Convert]::FromBase64String("${{ secrets.SECTIGO_CERT_BASE64 }}")
@@ -134,7 +142,7 @@ jobs:
             Write-Host "--- Signing: $($file.FullName) ---"
             java -jar jsign.jar `
               --storetype GOOGLECLOUD `
-              --storepass "$credsPath" `
+              --storepass "$accessToken" `
               --keystore "$keystore" `
               --alias "$keyName" `
               --certfile "$certPath" `
