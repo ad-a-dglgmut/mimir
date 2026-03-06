@@ -53,6 +53,12 @@ jobs:
         with:
           credentials_json: '${{ secrets.GCP_KMS_SERVICE_ACCOUNT_KEY }}'
           export_environment_variables: true
+      - name: Debug service account
+        shell: pwsh
+        run: |
+          $creds = '${{ secrets.GCP_KMS_SERVICE_ACCOUNT_KEY }}' | ConvertFrom-Json
+          Write-Host "Service account email: $($creds.client_email)"
+          Write-Host "Project: $($creds.project_id)"
 
       - name: Extract version
         id: extract_version
