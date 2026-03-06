@@ -91,9 +91,8 @@ jobs:
       - name: Sign Windows Binaries with jsign
         shell: pwsh
         run: |
-          # Download jsign and java check
+          # Download jsign
           Invoke-WebRequest -Uri "https://github.com/ebourg/jsign/releases/download/6.0/jsign-6.0.jar" -OutFile jsign.jar
-          java -version
 
           # Write credentials
           $credsJson = '${{ secrets.GCP_KMS_SERVICE_ACCOUNT_KEY }}'
@@ -119,6 +118,10 @@ jobs:
           Write-Host "KeyRing:  $keyRing"
           Write-Host "Key:      $keyName"
 
+          # jsign keystore must be: projects/PROJECT/locations/LOCATION/keyRings/RING
+          $keystore = "projects/$projectId/locations/$location/keyRings/$keyRing"
+          Write-Host "Keystore: $keystore"
+
           # Write cert to file
           $certBytes = [System.Convert]::FromBase64String("${{ secrets.SECTIGO_CERT_BASE64 }}")
           $certPath = "$pwd\sectigo_full.crt"
@@ -132,7 +135,7 @@ jobs:
             java -jar jsign.jar `
               --storetype GOOGLECLOUD `
               --storepass "$credsPath" `
-              --keystore "$projectId/locations/$location/keyRings/$keyRing" `
+              --keystore "$keystore" `
               --alias "$keyName" `
               --certfile "$certPath" `
               --tsaurl "$tsUrl" `
