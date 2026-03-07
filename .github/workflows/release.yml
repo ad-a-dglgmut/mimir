@@ -100,8 +100,7 @@ jobs:
           $creds = Get-Content $credsPath | ConvertFrom-Json
           Write-Host "Service account: $($creds.client_email)"
 
-          # Generate OAuth2 access token via JWT using the service account private key
-          # 1. Build JWT header and claims
+          # Generate OAuth2 access token via JWT
           $now = [int][double]::Parse((Get-Date -UFormat %s))
           $exp = $now + 3600
           $scope = "https://www.googleapis.com/auth/cloudkms"
@@ -111,7 +110,6 @@ jobs:
 
           $toSign = "$header.$claims"
 
-          # 2. Sign JWT with RSA-SHA256 using the private key from the JSON
           $rsaKey = [System.Security.Cryptography.RSA]::Create()
           $privateKeyPem = $creds.private_key -replace "-----BEGIN PRIVATE KEY-----",'' -replace "-----END PRIVATE KEY-----",'' -replace "`n",'' -replace "`r",''
           $privateKeyBytes = [Convert]::FromBase64String($privateKeyPem)
@@ -123,7 +121,6 @@ jobs:
 
           $jwt = "$toSign.$signature"
 
-          # 3. Exchange JWT for access token
           $tokenResponse = Invoke-RestMethod -Uri "https://oauth2.googleapis.com/token" -Method POST -ContentType "application/x-www-form-urlencoded" -Body "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=$jwt"
           $accessToken = $tokenResponse.access_token
 
@@ -162,6 +159,7 @@ jobs:
               --alias "$keyName" `
               --certfile "$certPath" `
               --tsaurl "$tsUrl" `
+              --tsmode RFC3161 `
               "$($file.FullName)"
 
             if ($LASTEXITCODE -ne 0) {
