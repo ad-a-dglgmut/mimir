@@ -113,7 +113,6 @@ def load_clean_csv(csv_path):
             break
 
     if not loaded or df is None:
-        # Final attempt with default parameters
         try:
             if check_file_type(csv_path) == 'csv':
                 df = pd.read_csv(csv_path)
@@ -558,22 +557,24 @@ def build_context_from_history(history_json):
 # =====================================================
 
 def apply_pandas_fixes(code):
-    """Apply critical pandas compatibility fixes"""
-    # Remove include_groups=False if LLM outputs it
+    """Apply critical pandas compatibility fixes for Pandas 2.0+"""
     code = code.replace(", include_groups=False", "")
     code = code.replace("include_groups=False", "")
-    code = re.sub(r"pd\.to_datetime\(([^)]+)\)", r"pd.to_datetime(\1, errors='coerce', infer_datetime_format=True)", code)
 
-    # Add group_keys=False where apply on groupby is used (best-effort)
-    if ".groupby(" in code and ".apply(" in code and "group_keys=False" not in code:
+    # 2. Fix to_datetime: 
+    if "pd.to_datetime(" in code and "errors=" not in code:
+        code = re.sub(r"pd\.to_datetime\(([^)]+)\)", r"pd.to_datetime(\1, errors='coerce')", code)
+    elif "pd.to_datetime(" in code:
+        code = code.replace("infer_datetime_format=True", "")
+        code = code.replace("infer_datetime_format=False", "")
+
+    if ".groupby(" in code and ".apply(" in code and "group_keys=" not in code:
         code = re.sub(
             r"\.groupby\((.*?)\)\.apply\((.*?)\)",
             r".groupby(\1, group_keys=False).apply(\2)",
             code
         )
 
-    # Fix idxmax/idxmin usage (return all rows that match)
-    # Example mapping: result = df.loc[df['col'].idxmax()] -> transform
     code = re.sub(
         r"result\s*=\s*df\.loc\[(df\[['\"]?.+?['\"]?\])\.idxmax\(\)\]",
         r"max_val = \1.max()\nresult = df.loc[df[\1] == max_val]",
@@ -584,10 +585,6 @@ def apply_pandas_fixes(code):
         r"min_val = \1.min()\nresult = df.loc[df[\1] == min_val]",
         code
     )
-
-    # Remove matplotlib imports/usages since we produce chart JSON externally
-    code = re.sub(r'^\s*(import matplotlib|import plt|from matplotlib).*$', '', code, flags=re.MULTILINE)
-    code = re.sub(r'^\s*plt\.\w+\(.*$', '', code, flags=re.MULTILINE)
 
     return code
 
@@ -851,30 +848,28 @@ def main_loop():
 
     for line in sys.stdin:
         try:
-            # Rust sends a single line of JSON
             input_data = json.loads(line)
             
-            # Extract arguments from JSON
             csv_path = input_data.get("csv_path")
             query = input_data.get("query")
             history_json = input_data.get("history", "[]")
             api_key = input_data.get("api_key")
 
-            # Setup Environment for this request
             if api_key:
                 os.environ["GROQ_API_KEY"] = api_key
             
             if client is None:
                 client = load_groq_client()
 
-            # Execute logic (your existing functions)
             df = load_clean_csv(csv_path)
             summary, rec_prompts, mimir_recs, chart, result, error = analyze_data(
                 df, query, client, history_json
             )
 
-            # Package output as a single JSON line for Rust to parse
             response = {
+                "raw_output": str(result)[:1000] if result is not None else "", 
+                "code": "Check Python Logs",                                    
+                "result": "success" if error is None else "error",
                 "summary": summary,
                 "recommended_prompts": rec_prompts,
                 "mimir_recommends": mimir_recs,
@@ -882,13 +877,11 @@ def main_loop():
                 "error": error
             }
             
-            # Signal the start of the JSON block
             print("===RESULT_START===")
             print(json.dumps(response))
             print("===RESULT_END===", flush=True)
 
         except Exception as e:
-            # Send error back in structured format
             err_resp = {"error": str(e)}
             print("===RESULT_START===")
             print(json.dumps(err_resp))

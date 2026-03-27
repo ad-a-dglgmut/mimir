@@ -1,69 +1,69 @@
 #!/bin/bash
 set -e
 
-echo "=== Setting up Python Environment for Tauri (Linux) ==="
+echo "=== Setting up Local Python Venv (Linux) ==="
 
-# 1. Path Setup - Match your project structure
-# This assumes the script is in the project root
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PYTHON_DIR="$SCRIPT_DIR/src-tauri/python"
+# 1. Get the directory where THIS script is located
+# All paths will be relative to this folder
+VENV_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV_PATH="$VENV_ROOT/linux-venv"
+REQ_FILE="$VENV_ROOT/../../requirements.txt" # Adjusting to find requirements in project root
 
-echo "Project root: $SCRIPT_DIR"
-echo "Target Python directory: $PYTHON_DIR"
+echo "Location: $VENV_ROOT"
 
-# 2. Clean and Create Directory
-if [ -d "$PYTHON_DIR" ]; then
-    echo "Cleaning existing Python directory..."
-    # We remove everything EXCEPT the windows-python folder if it exists
-    # to avoid breaking cross-platform builds
-    find "$PYTHON_DIR" -maxdepth 1 ! -name 'windows-python' ! -name 'python' -exec rm -rf {} +
+# 2. Clean existing venv
+if [ -d "$VENV_PATH" ]; then
+    echo "Cleaning existing Linux venv..."
+    rm -rf "$VENV_PATH"
 fi
 
-mkdir -p "$PYTHON_DIR"
-
-# 3. Create requirements.txt if missing
-if [ ! -f "$SCRIPT_DIR/requirements.txt" ]; then
-    cat > "$SCRIPT_DIR/requirements.txt" << EOF
-pandas>=2.0.0
-numpy>=1.24.0
-groq>=0.36.0
-matplotlib>=3.7.0
-openpyxl>=3.1.0
-EOF
-    echo "Created requirements.txt in project root"
-fi
-
-# 4. Create Linux Venv
-VENV_PATH="$PYTHON_DIR/linux-venv"
+# 3. Create Linux Venv
 echo "Creating venv in: $VENV_PATH"
-
 python3 -m venv "$VENV_PATH"
 
-# 5. Install Dependencies
-echo "Installing packages..."
-"$VENV_PATH/bin/pip" install --upgrade pip
-"$VENV_PATH/bin/pip" install -r "$SCRIPT_DIR/requirements.txt"
+# 4. Install Dependencies
+# If requirements.txt isn't 2 levels up, it checks the current folder
+if [ ! -f "$REQ_FILE" ]; then
+    REQ_FILE="$VENV_ROOT/requirements.txt"
+fi
 
-# 6. Copy Analyzer Script
-# Looks for analyzer.py in project root or src-tauri/python
-if [ -f "$SCRIPT_DIR/analyzer.py" ]; then
-    cp "$SCRIPT_DIR/analyzer.py" "$PYTHON_DIR/analyzer.py"
-elif [ -f "$PYTHON_DIR/analyzer.py" ]; then
-    echo "analyzer.py already in place"
+if [ -f "$REQ_FILE" ]; then
+    echo "Installing packages from $REQ_FILE..."
+    "$VENV_PATH/bin/pip" install --upgrade pip
+    "$VENV_PATH/bin/pip" install -r "$REQ_FILE"
 else
-    echo "Creating placeholder analyzer.py"
-    cat > "$PYTHON_DIR/analyzer.py" << 'EOF'
+    echo "Warning: No requirements.txt found. Installing base packages..."
+    "$VENV_PATH/bin/pip" install pandas numpy groq matplotlib openpyxl
+fi
+
+# 5. Ensure analyzer.py exists in this same folder
+if [ ! -f "$VENV_ROOT/analyzer.py" ]; then
+    echo "Creating placeholder analyzer.py..."
+    cat > "$VENV_ROOT/analyzer.py" << 'EOF'
 import sys
+import json
 import pandas as pd
-print(f"Python: {sys.version}")
-print(f"Pandas: {pd.__version__}")
+
+# This line is REQUIRED for your Rust 'start_python_service' function
+print("PYTHON_READY")
+sys.stdout.flush()
+
+for line in sys.stdin:
+    try:
+        data = json.loads(line)
+        # Your analysis logic goes here
+        print("===RESULT_START===")
+        print(json.dumps({"raw_output": "Success", "summary": "Venv is active"}))
+        print("===RESULT_END===")
+        sys.stdout.flush()
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
 EOF
 fi
 
-# 7. Fix Permissions
-echo "Setting execution permissions..."
+# 6. Fix Permissions
 chmod -R 755 "$VENV_PATH"
-chmod +x "$PYTHON_DIR/analyzer.py"
+chmod +x "$VENV_ROOT/analyzer.py"
 
 echo "=== Setup Complete! ==="
-echo "Linux venv size: $(du -sh "$VENV_PATH" | cut -f1)"
+echo "Venv size: $(du -sh "$VENV_PATH" | cut -f1)"
