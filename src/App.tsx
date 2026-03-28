@@ -41,6 +41,14 @@ import DarkIcon from "./assets/logo_notext.png"
 
 // ========== INTERFACES ==========
 
+interface MimirRecommendation {
+  recommendation: string;
+  cost_of_no_action: string;
+  cost_reasoning: string;
+  prediction: string;
+  prediction_reasoning: string;
+}
+
 interface AnalysisResponse {
   raw_output: string
   code: string
@@ -49,7 +57,7 @@ interface AnalysisResponse {
   chart?: string
   error?: string
   recommended_prompts?: string[]
-  mimir_recommends?: string[]
+  mimir_recommends?: MimirRecommendation[]; 
 }
 
 type FileDropPayload = {
@@ -1351,26 +1359,68 @@ const handleMergeFiles = async () => {
     )
   }
 
-  const renderMimirRecommends = (recommendations?: string[]) => {
-    if (!recommendations || recommendations.length === 0) return null
+const renderMimirRecommends = (recommendations?: MimirRecommendation[]) => {
+  if (!recommendations || recommendations.length === 0) return null
 
-    return (
-      <div className="bg-primary/5 border border-primary/20 rounded-lg p-6">
-        <div className="flex items-center gap-2 mb-4">
-          <Brain className="w-5 h-5 text-primary" />
-          <h3 className="font-semibold text-foreground">Mimir Recommends</h3>
-        </div>
-        <div className="space-y-3">
-          {recommendations.map((recommendation, index) => (
-            <div key={index} className="flex items-start gap-3 p-3 bg-card rounded-lg border">
-              <div className="w-2 h-2 bg-primary rounded-full mt-2 flex-shrink-0" />
-              <p className="text-sm text-foreground flex-1 break-words">{recommendation}</p>
-            </div>
-          ))}
-        </div>
+  return (
+    <div className="bg-primary/5 border border-primary/20 rounded-lg p-6">
+      <div className="flex items-center gap-2 mb-4">
+        <Brain className="w-5 h-5 text-primary" />
+        <h3 className="font-semibold text-foreground">Mimir Reccomends</h3>
       </div>
-    )
-  }
+      <div className="space-y-6">
+        {recommendations.map((item, index) => (
+          <div key={index} className="bg-card rounded-lg border overflow-hidden shadow-sm">
+            {/* The Core Advice */}
+            <div className="p-4 bg-accent/5">
+              <div className="flex items-start gap-3">
+                <Sparkles className="w-5 h-5 text-primary mt-1 flex-shrink-0" />
+                <p className="text-base font-semibold text-foreground leading-tight">
+                  {item.recommendation}
+                </p>
+              </div>
+            </div>
+            
+            {/* Simulation Details Dropdown */}
+            <details className="group border-t border-border">
+              <summary className="flex items-center justify-between px-4 py-3 cursor-pointer hover:bg-accent/50 transition-colors list-none">
+                <span className="text-sm font-bold text-muted-foreground uppercase tracking-widest flex items-center gap-2">
+                  <Activity className="w-4 h-4" />
+                  View Impact Simulations
+                </span>
+                <ChevronUp className="w-4 h-4 text-muted-foreground transition-transform group-open:rotate-180" />
+              </summary>
+              
+              <div className="px-4 pb-6 pt-2 grid grid-cols-1 md:grid-cols-2 gap-4">
+                
+                {/* COLUMN: PREDICTION (SUCCESS) */}
+                <div className="space-y-3 p-4 bg-primary/5 border border-primary/10 rounded-xl relative overflow-hidden">
+                   <div className="absolute top-0 right-0 p-2 opacity-10"><Zap className="w-12 h-12 text-primary" /></div>
+                   <h4 className="text-xs font-black text-primary uppercase">Mimir Prediction</h4>
+                   <p className="text-sm font-bold text-foreground italic">"{item.prediction}"</p>
+                   <div className="pt-2 border-t border-primary/20">
+                      <p className="text-xs text-muted-foreground"><span className="font-bold">Logic:</span> {item.prediction_reasoning}</p>
+                   </div>
+                </div>
+
+                {/* COLUMN: COST OF NO ACTION (RISK) */}
+                <div className="space-y-3 p-4 bg-destructive/5 border border-destructive/10 rounded-xl relative overflow-hidden">
+                   <div className="absolute top-0 right-0 p-2 opacity-10"><Trash2 className="w-12 h-12 text-destructive" /></div>
+                   <h4 className="text-xs font-black text-destructive uppercase">Cost of No Action</h4>
+                   <p className="text-sm font-bold text-foreground italic">"{item.cost_of_no_action}"</p>
+                   <div className="pt-2 border-t border-destructive/20">
+                      <p className="text-xs text-muted-foreground"><span className="font-bold">Logic:</span> {item.cost_reasoning}</p>
+                   </div>
+                </div>
+
+              </div>
+            </details>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
 
   // ========== EXPORT MODAL COMPONENT ==========
 
@@ -2131,14 +2181,21 @@ const handleMergeFiles = async () => {
                       {item.response.result && (
                         <div className="space-y-4">
                           <div className="flex items-center gap-2">
-                            <BarChart3 className="w-5 h-5 text-primary" />
-                            <h3 className="font-bold text-foreground">Analysis</h3>
+                            {
+                              
+                              //<BarChart3 className="w-5 h-5 text-primary" />
+                              //<h3 className="font-bold text-foreground">Analysis</h3>
+                            } 
                           </div>
-                          <div className="bg-secondary/50 border rounded p-4">
-                            <pre className="text-sm font-mono text-foreground whitespace-pre-wrap break-words">
-                              {item.response.result}
-                            </pre>
-                          </div>
+                          {
+                            /*
+                           <div className="bg-secondary/50 border rounded p-4">
+                             <pre className="text-sm font-mono text-foreground whitespace-pre-wrap break-words">
+                               {item.response.result}
+                             </pre>
+                           </div>
+                             */
+                          }
                         </div>
                       )}
 

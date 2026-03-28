@@ -669,44 +669,41 @@ Return ONLY a JSON array with exactly 3 strings, no explanations:
 
 
 def generate_mimir_recommends(df, user_query, result, client):
-    """Generate 2 expert recommendations"""
+    """Generate expert recommendations with Prediction and Cost of No Action logic"""
     try:
-        result_preview = ""
-        if result is not None:
-            if hasattr(result, 'head'):
-                result_preview = str(result.head(5))[:500]
-            else:
-                result_preview = str(result)[:500]
+        result_preview = str(result.head(5))[:500] if hasattr(result, 'head') else str(result)[:500]
 
-        error_info = ""
-        if result is None:
-            error_info = " (Note: Previous analysis had issues)"
+        prompt = f"""As Mimir, the wise data analyst, provide 2 expert recommendations based on this analysis.
+        For each recommendation, you must provide:
+        1. The Recommendation: What should be done.
+        2. Cost of No Action: A simulation of the negative outcome if ignored.
+        3. Cost Reasoning: The logic/mechanics of why that negative outcome occurs.
+        4. Mimir Prediction: A simulation of the positive outcome if implemented.
+        5. Prediction Reasoning: The logic/mechanics of why this positive change will happen.
 
-        prompt = f"""As Mimir, the wise data analyst AI, provide 2 expert recommendations based on this analysis.
+        Dataset: {list(df.columns)}
+        Question: "{user_query}"
+        Result: {result_preview}
 
-Dataset info: {list(df.columns)}
-User's question: "{user_query}"
-Analysis result preview: {result_preview}{error_info}
+        Return ONLY a JSON array of objects with this structure:
+        [
+          {{
+            "recommendation": "...",
+            "cost_of_no_action": "...",
+            "cost_reasoning": "...",
+            "prediction": "...",
+            "prediction_reasoning": "..."
+          }}
+        ]"""
 
-IMPORTANT: You MUST return exactly 2 insightful recommendations as a JSON array of strings.
-
-Return ONLY a JSON array with exactly 2 strings:
-["recommendation 1", "recommendation 2"]"""
-
-        recommendations_text = call_groq(client, prompt, max_tokens=300, temperature=0.3)
-        if recommendations_text:
-            recs_match = re.search(r'\[.*\]', recommendations_text, re.DOTALL)
+        recs_text = call_groq(client, prompt, max_tokens=1000, temperature=0.6)
+        if recs_text:
+            recs_match = re.search(r'\[.*\]', recs_text, re.DOTALL)
             if recs_match:
-                recommendations = json.loads(recs_match.group())
-                if isinstance(recommendations, list) and len(recommendations) >= 1:
-                    return recommendations[:2]
+                return json.loads(recs_match.group())
     except Exception as e:
-        print(f"Could not generate Mimir recommendations: {e}")
-
-    return [
-        "Consider analyzing data quality and missing values for more reliable insights",
-        "Explore categorical variable distributions to understand data composition"
-    ]
+        print(f"Error: {e}")
+    return []
 
 
 # =====================================================

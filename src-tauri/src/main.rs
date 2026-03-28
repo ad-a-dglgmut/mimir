@@ -205,15 +205,27 @@ struct QueryHistory {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
+struct MimirRecommendation {
+    recommendation: String,
+    cost_of_no_action: String,
+    cost_reasoning: String,
+    prediction: String,
+    prediction_reasoning: String,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
 struct AnalysisResponse {
+    #[serde(default)]
     raw_output: String,
+    #[serde(default)]
     code: String,
+    #[serde(default)]
     result: String,
     summary: String,
     chart: Option<String>,
     error: Option<String>,
     recommended_prompts: Option<Vec<String>>,
-    mimir_recommends: Option<Vec<String>>,
+    mimir_recommends: Option<Vec<MimirRecommendation>>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -662,7 +674,8 @@ fn parse_python_output(stdout_raw: &str, stderr_raw: &str) -> AnalysisResponse {
         "=== MIMIR_RECOMMENDS_END ===",
     );
     if !mimir_text.is_empty() {
-        if let Ok(recommends) = serde_json::from_str::<Vec<String>>(&mimir_text) {
+        // Updated to use MimirRecommendation struct instead of plain String
+        if let Ok(recommends) = serde_json::from_str::<Vec<MimirRecommendation>>(&mimir_text) {
             response.mimir_recommends = Some(recommends);
         }
     }
