@@ -5,7 +5,6 @@ import { useState, useEffect, useRef } from "react"
 import * as echarts from "echarts"
 import {
   FileText,
-  BarChart3,
   Loader2,
   Database,
   Plus,
@@ -29,6 +28,7 @@ import {
   Image,
   FileSpreadsheet,
 } from "lucide-react"
+//import { BarChart3 } from "lucide-react"
 import { Window } from "@tauri-apps/api/window"
 import { invoke } from "@tauri-apps/api/core"
 import { listen } from "@tauri-apps/api/event"
