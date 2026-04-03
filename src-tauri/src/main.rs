@@ -496,14 +496,15 @@ async fn start_python_service(
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
 
-    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn Python process: {}", e))?;
 
     let stdin = child.stdin.take().ok_or("Failed to open stdin")?;
     let stdout = child.stdout.take().ok_or("Failed to open stdout")?;
     let mut reader = BufReader::new(stdout);
 
+    // Wait for "PYTHON_READY" signal from the script
     let mut ready_line = String::new();
-    reader.read_line(&mut ready_line).map_err(|e| e.to_string())?;
+    reader.read_line(&mut ready_line).map_err(|e| format!("Failed to read readiness from Python: {}", e))?;
 
     *process_lock = Some(ActiveProcess { child, stdin, reader });
     Ok("Python service started and warmed up".to_string())
