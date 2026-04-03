@@ -482,6 +482,13 @@ async fn start_python_service(
 
     let (python_bin, analyzer_path) = get_python_paths(&app_handle)?;
 
+    let mut cmd = Command::new(&python_bin);
+    
+    cmd.arg(&analyzer_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
@@ -489,19 +496,12 @@ async fn start_python_service(
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
-    let mut child = Command::new(&python_bin)
-        .arg(&analyzer_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .map_err(|e| e.to_string())?;
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
 
     let stdin = child.stdin.take().ok_or("Failed to open stdin")?;
     let stdout = child.stdout.take().ok_or("Failed to open stdout")?;
     let mut reader = BufReader::new(stdout);
 
-    // Wait for "PYTHON_READY" signal from the script
     let mut ready_line = String::new();
     reader.read_line(&mut ready_line).map_err(|e| e.to_string())?;
 
