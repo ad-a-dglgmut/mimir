@@ -482,6 +482,13 @@ async fn start_python_service(
 
     let (python_bin, analyzer_path) = get_python_paths(&app_handle)?;
 
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
     let mut child = Command::new(&python_bin)
         .arg(&analyzer_path)
         .stdin(Stdio::piped())

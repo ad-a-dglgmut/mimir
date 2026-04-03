@@ -839,6 +839,11 @@ def read_history_arg(arg: str) -> str:
     return arg
 
 def main_loop():
+
+    sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8')
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+
     client = None
     # Pre-initialize these so they persist in memory
     print("PYTHON_READY", flush=True)
@@ -879,7 +884,13 @@ def main_loop():
             print("===RESULT_END===", flush=True)
 
         except Exception as e:
-            err_resp = {"error": str(e)}
+            err_resp = {
+                "summary": "Encoding or Parsing Error",
+                "raw_output": "",
+                "code": "",
+                "result": "error",
+                "error": str(e)
+            }
             print("===RESULT_START===")
             print(json.dumps(err_resp))
             print("===RESULT_END===", flush=True)
