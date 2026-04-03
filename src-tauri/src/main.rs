@@ -493,7 +493,7 @@ async fn start_python_service(
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
-        command.creation_flags(CREATE_NO_WINDOW);
+        cmd.creation_flags(CREATE_NO_WINDOW);
     }
 
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
