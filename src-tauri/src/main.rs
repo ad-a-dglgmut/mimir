@@ -599,35 +599,56 @@ async fn analyze_query(
 
 
 fn get_python_paths(app_handle: &AppHandle) -> Result<(String, String), String> {
-    let resource_dir = app_handle.path().resource_dir()
-        .map_err(|e| format!("Failed to get resource directory: {}", e))?;
-    
-    let python_dir = resource_dir.join("python");
-    
-    let (python_bin, analyzer_path) = if cfg!(target_os = "windows") {
-        (
-            python_dir.join("windows-python").join("python.exe"), 
-            python_dir.join("analyzer.py")
-        )
-    } else {
-        (
-            python_dir.join("linux-venv").join("bin").join("python"),
-            python_dir.join("analyzer.py")
-        )
-    };
+    // In dev mode, use the venv from the source tree directly
+    #[cfg(dev)]
+    {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let python_dir = PathBuf::from(manifest_dir).join("python");
+        
+        let python_bin = python_dir.join("linux-venv").join("bin").join("python");
+        let analyzer_path = python_dir.join("analyzer.py");
 
-    if !python_bin.exists() {
-        return Err(format!("Python binary not found at: {:?}", python_bin));
-    }
-    
-    if !analyzer_path.exists() {
-        return Err(format!("Analyzer script not found at: {:?}", analyzer_path));
+        if !python_bin.exists() {
+            return Err(format!("Python binary not found at: {:?} — run create-venvs.sh first", python_bin));
+        }
+        if !analyzer_path.exists() {
+            return Err(format!("Analyzer script not found at: {:?}", analyzer_path));
+        }
+
+        return Ok((
+            python_bin.to_string_lossy().to_string(),
+            analyzer_path.to_string_lossy().to_string(),
+        ));
     }
 
-    Ok((
-        python_bin.to_string_lossy().to_string(),
-        analyzer_path.to_string_lossy().to_string()
-    ))
+    // In release, use the bundled resource directory
+    #[cfg(not(dev))]
+    {
+        let resource_dir = app_handle.path().resource_dir()
+            .map_err(|e| format!("Failed to get resource directory: {}", e))?;
+
+        let python_dir = resource_dir.join("python");
+
+        let python_bin = if cfg!(target_os = "windows") {
+            python_dir.join("windows-python").join("python.exe")
+        } else {
+            python_dir.join("linux-venv").join("bin").join("python")
+        };
+
+        let analyzer_path = python_dir.join("analyzer.py");
+
+        if !python_bin.exists() {
+            return Err(format!("Python binary not found at: {:?}", python_bin));
+        }
+        if !analyzer_path.exists() {
+            return Err(format!("Analyzer script not found at: {:?}", analyzer_path));
+        }
+
+        Ok((
+            python_bin.to_string_lossy().to_string(),
+            analyzer_path.to_string_lossy().to_string(),
+        ))
+    }
 }
 
 fn parse_python_output(stdout_raw: &str, stderr_raw: &str) -> AnalysisResponse {

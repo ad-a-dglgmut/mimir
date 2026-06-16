@@ -32,10 +32,15 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": [
-      "keys/tauri.pub",
-      "python/**/*"
-    ]
+"resources": [
+  "keys/tauri.pub",
+  "python/analyzer.py",
+  "python/create-venvs.sh",
+  "python/create-macos-venv.sh",
+  "python/create-macos-venv-venvpack.sh",
+  "python/create-venvs.ps1",
+  "python/create-windows-python.ps1"
+]
   },
   "plugins": {
     "updater": {
