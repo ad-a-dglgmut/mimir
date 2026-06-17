@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import io
 import re
 import json
 import sys
