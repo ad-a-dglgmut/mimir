@@ -182,7 +182,7 @@ def call_groq(client, prompt, max_tokens=500, temperature=0.1, role="user"):
     """Call Groq API with automatic continuation and safe mode for summaries."""
     try:
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-120b",
             messages=[{"role": "system",
                        "content": "You are a helpful, concise data analyst. "
                                   "Speak only in natural language unless code is requested."},
@@ -195,7 +195,7 @@ def call_groq(client, prompt, max_tokens=500, temperature=0.1, role="user"):
         # If output seems incomplete, request a continuation
         if text.endswith("...") or len(text.split()) > 0.95 * max_tokens:
             continuation = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model="openai/gpt-oss-120b",
                 messages=[{"role": "system",
                            "content": "Continue the previous response clearly in plain English."},
                           {"role": "assistant", "content": text}],
