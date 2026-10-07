@@ -62,14 +62,64 @@ jobs:
         with: { node-version: 20 }
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Add Signtool to PATH
+      # ------------------------------------------------------------------
+      # STEP A: prepare everything signing needs BEFORE the build.
+      # (Previously this all happened after the build, which was too late.)
+      # Results are exported as env vars so scripts/sign-windows.ps1 can use
+      # them, both from this workflow and when called by Tauri's signCommand.
+      # ------------------------------------------------------------------
+      - name: Prepare code signing (jsign, KMS token, certificate)
         shell: pwsh
         run: |
-          $getSigntool = Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Select-Object -First 1
-          if ($getSigntool) {
-              $signtoolPath = Split-Path $getSigntool.FullName
-              echo "$signtoolPath" >> $env:GITHUB_PATH
+          # jsign
+          $jsign = Join-Path $env:RUNNER_TEMP "jsign.jar"
+          Invoke-WebRequest -Uri "https://github.com/ebourg/jsign/releases/download/6.0/jsign-6.0.jar" -OutFile $jsign
+
+          # Service account credentials (exported by the google auth action)
+          $creds = Get-Content $env:GOOGLE_APPLICATION_CREDENTIALS | ConvertFrom-Json
+
+          function ConvertTo-Base64Url([byte[]]$bytes) {
+            [Convert]::ToBase64String($bytes) -replace '=+$','' -replace '\+','-' -replace '/','_'
           }
+
+          # Build a JWT and exchange it for an OAuth2 access token (valid 1 hour)
+          $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+          $exp = $now + 3600
+          $header = ConvertTo-Base64Url ([Text.Encoding]::UTF8.GetBytes('{"alg":"RS256","typ":"JWT"}'))
+          $claims = ConvertTo-Base64Url ([Text.Encoding]::UTF8.GetBytes(
+            (@{ iss = $creds.client_email; scope = "https://www.googleapis.com/auth/cloudkms"; aud = "https://oauth2.googleapis.com/token"; exp = $exp; iat = $now } | ConvertTo-Json -Compress)))
+          $toSign = "$header.$claims"
+
+          $rsa = [System.Security.Cryptography.RSA]::Create()
+          $pem = $creds.private_key -replace "-----BEGIN PRIVATE KEY-----",'' -replace "-----END PRIVATE KEY-----",'' -replace "\s",''
+          $rsa.ImportPkcs8PrivateKey([Convert]::FromBase64String($pem), [ref]$null)
+          $sig = ConvertTo-Base64Url ($rsa.SignData([Text.Encoding]::UTF8.GetBytes($toSign), [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1))
+          $jwt = "$toSign.$sig"
+
+          $tokenResponse = Invoke-RestMethod -Uri "https://oauth2.googleapis.com/token" -Method POST `
+            -ContentType "application/x-www-form-urlencoded" `
+            -Body "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=$jwt"
+          $accessToken = $tokenResponse.access_token
+          if (-not $accessToken) { Write-Error "Failed to get access token"; exit 1 }
+          Write-Host "Got access token"
+
+          # Keystore / key name from the KMS key path secret
+          $keyPath = "${{ secrets.GCP_KMS_KEY_PATH }}".Trim().Trim('"').Trim("'")
+          $parts = $keyPath -split "/"
+          $keystore = "projects/$($parts[1])/locations/$($parts[3])/keyRings/$($parts[5])"
+          $keyName = $parts[7]
+
+          # Certificate chain (leaf + Sectigo intermediates) to a file
+          $certPath = Join-Path $env:RUNNER_TEMP "sectigo_full.crt"
+          [System.IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String("${{ secrets.SECTIGO_CERT_BASE64 }}"))
+
+          # Hide the token in logs, then export for later steps
+          Write-Host "::add-mask::$accessToken"
+          "GCP_ACCESS_TOKEN=$accessToken" >> $env:GITHUB_ENV
+          "KMS_KEYSTORE=$keystore"        >> $env:GITHUB_ENV
+          "KMS_KEY=$keyName"              >> $env:GITHUB_ENV
+          "SIGN_CERT_PATH=$certPath"      >> $env:GITHUB_ENV
+          "JSIGN_JAR=$jsign"              >> $env:GITHUB_ENV
 
       - name: Build Python (Windows)
         shell: pwsh
@@ -77,105 +127,105 @@ jobs:
           cd src-tauri/python
           ./create-windows-python.ps1
           cd ../..
-          $tauriConf = Get-Content "src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json
-          $tauriConf.bundle.resources = @("python/**/*")
-          $tauriConf.version = "${{ steps.extract_version.outputs.version }}"
-          $tauriConf | ConvertTo-Json -Depth 10 | Set-Content "src-tauri/tauri.conf.json"
           (Get-Content src-tauri/Cargo.toml) -replace '^version = ".*"', 'version = "${{ steps.extract_version.outputs.version }}"' | Set-Content src-tauri/Cargo.toml
+
+      # ------------------------------------------------------------------
+      # STEP B: sign the bundled Python runtime (python.exe, DLLs, .pyd).
+      # These ship inside the installer, so they must be signed BEFORE the
+      # build packages them. Files that already carry a valid signature
+      # (e.g. python.org / Microsoft files) are left alone.
+      # ------------------------------------------------------------------
+      - name: Sign bundled Python binaries
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem "src-tauri/python/windows-python" -Recurse -Include *.exe,*.dll,*.pyd |
+            Where-Object { (Get-AuthenticodeSignature $_.FullName).Status -eq 'NotSigned' } |
+            ForEach-Object { $_.FullName }
+
+          Write-Host "Unsigned binaries to sign: $($files.Count)"
+
+          # One jsign call per chunk (much faster than one JVM start per file)
+          $chunkSize = 40
+          for ($i = 0; $i -lt $files.Count; $i += $chunkSize) {
+            $chunk = $files[$i..([Math]::Min($i + $chunkSize, $files.Count) - 1)]
+            & "$env:GITHUB_WORKSPACE\scripts\sign-windows.ps1" @chunk
+            if ($LASTEXITCODE -ne 0) { Write-Error "Signing failed"; exit 1 }
+          }
+
+      # ------------------------------------------------------------------
+      # STEP C: tell Tauri to sign every binary itself during the build.
+      # Tauri calls signCommand for the app .exe BEFORE packing it into the
+      # MSI, signs the MSI, and only then generates the updater .sig, so
+      # the updater signature stays valid.
+      # ------------------------------------------------------------------
+      - name: Configure Tauri (version, resources, signCommand)
+        shell: pwsh
+        run: |
+          $path = "src-tauri/tauri.conf.json"
+          $conf = Get-Content $path -Raw | ConvertFrom-Json
+          $conf.version = "${{ steps.extract_version.outputs.version }}"
+          $conf.bundle.resources = @("python/**/*")
+
+          if (-not $conf.bundle.windows) {
+            $conf.bundle | Add-Member -NotePropertyName windows -NotePropertyValue ([pscustomobject]@{})
+          }
+          $signCommand = [pscustomobject]@{
+            cmd  = "powershell"
+            args = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "$env:GITHUB_WORKSPACE\scripts\sign-windows.ps1", "%1")
+          }
+          $conf.bundle.windows | Add-Member -NotePropertyName signCommand -NotePropertyValue $signCommand -Force
+
+          $conf | ConvertTo-Json -Depth 20 | Set-Content $path
 
       - name: Build App
         run: npm install && npm run build && npx tauri build --target x86_64-pc-windows-msvc
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
 
-      - name: Sign Windows Binaries with jsign
+      # ------------------------------------------------------------------
+      # STEP D: verify instead of re-signing. Fails the job if anything
+      # that users will actually run is unsigned.
+      # ------------------------------------------------------------------
+      - name: Verify signatures (installer AND contents)
         shell: pwsh
         run: |
-          # Download jsign
-          Invoke-WebRequest -Uri "https://github.com/ebourg/jsign/releases/download/6.0/jsign-6.0.jar" -OutFile jsign.jar
+          $bundle = "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi"
+          $msi = Get-ChildItem "$bundle/*.msi" | Select-Object -First 1
+          $failed = $false
 
-          # Load service account credentials
-          $credsPath = $env:GOOGLE_APPLICATION_CREDENTIALS
-          Write-Host "Using credentials from: $credsPath"
-          $creds = Get-Content $credsPath | ConvertFrom-Json
-          Write-Host "Service account: $($creds.client_email)"
+          $s = Get-AuthenticodeSignature $msi.FullName
+          Write-Host "MSI: $($s.Status) - $($s.SignerCertificate.Subject)"
+          if ($s.Status -ne 'Valid') { $failed = $true }
 
-          # Generate OAuth2 access token via JWT
-          $now = [int][double]::Parse((Get-Date -UFormat %s))
-          $exp = $now + 3600
-          $scope = "https://www.googleapis.com/auth/cloudkms"
+          # Unpack the MSI without installing, then inspect what users would get
+          $extract = Join-Path $env:RUNNER_TEMP "msi-extract"
+          Start-Process msiexec -ArgumentList "/a `"$($msi.FullName)`" /qn TARGETDIR=`"$extract`"" -Wait
 
-          $header = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('{"alg":"RS256","typ":"JWT"}')) -replace '=+$','' -replace '\+','-' -replace '/','_'
-          $claims = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("{`"iss`":`"$($creds.client_email)`",`"scope`":`"$scope`",`"aud`":`"https://oauth2.googleapis.com/token`",`"exp`":$exp,`"iat`":$now}")) -replace '=+$','' -replace '\+','-' -replace '/','_'
-
-          $toSign = "$header.$claims"
-
-          $rsaKey = [System.Security.Cryptography.RSA]::Create()
-          $privateKeyPem = $creds.private_key -replace "-----BEGIN PRIVATE KEY-----",'' -replace "-----END PRIVATE KEY-----",'' -replace "`n",'' -replace "`r",''
-          $privateKeyBytes = [Convert]::FromBase64String($privateKeyPem)
-          $rsaKey.ImportPkcs8PrivateKey($privateKeyBytes, [ref]$null)
-
-          $toSignBytes = [Text.Encoding]::UTF8.GetBytes($toSign)
-          $signatureBytes = $rsaKey.SignData($toSignBytes, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)
-          $signature = [Convert]::ToBase64String($signatureBytes) -replace '=+$','' -replace '\+','-' -replace '/','_'
-
-          $jwt = "$toSign.$signature"
-
-          $tokenResponse = Invoke-RestMethod -Uri "https://oauth2.googleapis.com/token" -Method POST -ContentType "application/x-www-form-urlencoded" -Body "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=$jwt"
-          $accessToken = $tokenResponse.access_token
-
-          if (-not $accessToken) {
-            Write-Error "❌ Failed to get access token"
-            exit 1
-          }
-          Write-Host "✅ Got access token"
-
-          # Parse key path into components
-          $keyPath = "${{ secrets.GCP_KMS_KEY_PATH }}".Trim().Trim('"').Trim("'")
-          $parts = $keyPath -split "/"
-          $projectId = $parts[1]
-          $location  = $parts[3]
-          $keyRing   = $parts[5]
-          $keyName   = $parts[7]
-
-          $keystore = "projects/$projectId/locations/$location/keyRings/$keyRing"
-          Write-Host "Keystore: $keystore"
-          Write-Host "Key:      $keyName"
-
-          # Write cert to file
-          $certBytes = [System.Convert]::FromBase64String("${{ secrets.SECTIGO_CERT_BASE64 }}")
-          $certPath = "$pwd\sectigo_full.crt"
-          [System.IO.File]::WriteAllBytes($certPath, $certBytes)
-
-          $tsUrl = "http://timestamp.sectigo.com/rfc3161"
-          $filesToSign = Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi", "src-tauri/target/x86_64-pc-windows-msvc/release/*.exe"
-
-          foreach ($file in $filesToSign) {
-            Write-Host "--- Signing: $($file.FullName) ---"
-            java -jar jsign.jar `
-              --storetype GOOGLECLOUD `
-              --storepass "$accessToken" `
-              --keystore "$keystore" `
-              --alias "$keyName" `
-              --certfile "$certPath" `
-              --tsaurl "$tsUrl" `
-              --tsmode RFC3161 `
-              "$($file.FullName)"
-
-            if ($LASTEXITCODE -ne 0) {
-              Write-Error "Signing failed."
-              exit 1
+          Get-ChildItem $extract -Recurse -Include *.exe,*.dll,*.pyd | ForEach-Object {
+            $sig = Get-AuthenticodeSignature $_.FullName
+            if ($sig.Status -eq 'NotSigned') {
+              Write-Host "UNSIGNED: $($_.FullName)"
+              $failed = $true
+            } elseif ($sig.Status -ne 'Valid') {
+              Write-Host "WARNING ($($sig.Status)): $($_.FullName)"
             }
-
-            Write-Host "--- Verifying: $($file.FullName) ---"
-            signtool verify /v /pa "$($file.FullName)"
           }
+
+          if ($failed) { Write-Error "Signature verification failed"; exit 1 }
+          Write-Host "All binaries are signed"
 
       - name: Upload Windows Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: windows-build
           path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/
+
+      - name: Clean up signing secrets
+        if: always()
+        shell: pwsh
+        run: |
+          Remove-Item $env:SIGN_CERT_PATH -ErrorAction SilentlyContinue
+          Remove-Item $env:JSIGN_JAR -ErrorAction SilentlyContinue
 
   upload-updates:
     runs-on: ubuntu-latest
