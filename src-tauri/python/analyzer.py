@@ -4,8 +4,6 @@ import io
 import re
 import json
 import sys
-import uuid
-import tempfile
 import pandas as pd
 import numpy as np
 from groq import Groq
@@ -13,6 +11,34 @@ import matplotlib
 
 # Use Agg backend for any possible plotting in executed code (non-interactive)
 matplotlib.use('Agg')
+
+# =====================================================
+# Config
+# =====================================================
+# Set this to the model you switched to after the deprecation.
+# You can also override it without touching code via the GROQ_MODEL env var.
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+
+SYSTEM_PROSE = (
+    "You are a helpful, concise data analyst. "
+    "Reply in plain prose only. Never use markdown, tables, pipes, bullet lists, "
+    "headers, bold text, or code blocks. Never reproduce rows or columns of data; "
+    "describe findings in words."
+)
+SYSTEM_CODE = (
+    "You are an expert Python and pandas programmer. "
+    "Output only executable Python code, with no explanations."
+)
+SYSTEM_JSON = (
+    "You are a data analyst that outputs only valid JSON. "
+    "No markdown fences, no commentary before or after the JSON."
+)
+SYSTEMS = {"prose": SYSTEM_PROSE, "code": SYSTEM_CODE, "json": SYSTEM_JSON}
+
+
+def log_err(msg):
+    """Errors go to stderr so they show up in the terminal (Rust inherits stderr)."""
+    print(msg, file=sys.stderr, flush=True)
 
 
 def check_file_type(file_path):
@@ -43,29 +69,21 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """
     df = df.copy()
 
-    # First, ensure column names are strings and sanitized (already done later, but safe)
     df.columns = [str(c).strip().lower().replace(" ", "_").replace("-", "_") if str(c).strip() != "" else f"col_{i}"
                   for i, c in enumerate(df.columns)]
 
-    # Strip non-printable chars in all string cells
     for col in df.columns:
-        # Convert bytes / non-string gracefully
         if df[col].dtype == object or df[col].dtype.name == 'string':
             df[col] = df[col].astype(str).apply(strip_nonprintable).replace({'nan': None, 'None': None})
 
-    # Heuristic numeric coercion
     for col in df.columns:
-        # sample non-null values
         sample = df[col].dropna().astype(str).head(100)
         if sample.empty:
             continue
 
-        # Remove common currency/symbols and commas for testing
         cleaned = sample.str.replace(r'[\$\£\€\¥,]', '', regex=True).str.replace(r'\s+', '', regex=True)
-        # Now test how many values look numeric
         looks_numeric = cleaned.str.match(r'^-?\d+(\.\d+)?$')
         numeric_ratio = float(looks_numeric.sum()) / float(len(cleaned))
-        # If more than 50% look numeric, coerce entire column
         if numeric_ratio >= 0.5:
             coerced = pd.to_numeric(
                 df[col].astype(str).str.replace(r'[^\d\.\-]', '', regex=True),
@@ -104,7 +122,7 @@ def load_clean_csv(csv_path):
                     df = pd.read_excel(csv_path)
 
                 if df is not None and df.shape[1] > 0 and df.shape[0] > 0:
-                    print(f"Loaded successfully with sep='{sep}' encoding='{enc}' → {df.shape}")
+                    print(f"Loaded successfully with sep='{sep}' encoding='{enc}' -> {df.shape}")
                     loaded = True
                     break
             except Exception as e:
@@ -119,18 +137,16 @@ def load_clean_csv(csv_path):
                 df = pd.read_csv(csv_path)
             elif check_file_type(csv_path) == 'excel':
                 df = pd.read_excel(csv_path)
-            print(f"Loaded with default parameters → {df.shape}")
+            print(f"Loaded with default parameters -> {df.shape}")
         except Exception as e:
             raise ValueError(f"Could not parse file: {e}")
 
-    # Clean headers
     df.columns = [
         str(c).strip().lower().replace(" ", "_").replace("-", "_")
         if str(c).strip() != "" else f"col_{i}"
         for i, c in enumerate(df.columns)
     ]
 
-    # Strip non-printables and normalize strings
     for col in df.columns:
         if df[col].dtype == object or df[col].dtype.name == 'string':
             df[col] = df[col].astype(str).apply(strip_nonprintable).replace({
@@ -146,7 +162,6 @@ def load_clean_csv(csv_path):
     if df.shape[0] > 0:
         df.dropna(axis=0, thresh=max(1, int(df.shape[1] * 0.3)), inplace=True)
 
-    # Normalize data types / coerce numeric-like columns
     df = normalize_dataframe(df)
 
     print("Cleaned columns:", list(df.columns))
@@ -162,12 +177,11 @@ def load_clean_csv(csv_path):
 # 2. Initialize Groq Client
 # =====================================================
 
-def load_groq_client():
-    api_key = os.getenv("GROQ_API_KEY")
+def load_groq_client(api_key=None):
+    api_key = (api_key or os.getenv("GROQ_API_KEY") or "").strip().strip('"').strip("'")
     if not api_key:
         raise ValueError(
-            "GROQ_API_KEY not found in environment variables.\n"
-            "Set it in your environment (for example on Windows: setx GROQ_API_KEY \"your-key\")"
+            "GROQ_API_KEY not found. Pass it from the app or set it in your environment."
         )
 
     print("Connected to Groq API (client available)")
@@ -178,35 +192,81 @@ def load_groq_client():
 # 3. Call Groq API
 # =====================================================
 
-def call_groq(client, prompt, max_tokens=500, temperature=0.1, role="user"):
-    """Call Groq API with automatic continuation and safe mode for summaries."""
+def call_groq(client, prompt, max_tokens=500, temperature=0.1, mode="prose"):
+    """
+    Call the Groq API.
+    mode: "prose" (plain-text answers), "code" (Python only), "json" (JSON only).
+    On failure returns None and stores the reason in call_groq.last_error.
+    """
+    system_prompt = SYSTEMS.get(mode, SYSTEM_PROSE)
     try:
         response = client.chat.completions.create(
-            model="openai/gpt-oss-120b",
-            messages=[{"role": "system",
-                       "content": "You are a helpful, concise data analyst. "
-                                  "Speak only in natural language unless code is requested."},
-                      {"role": role, "content": prompt}],
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ],
             max_tokens=max_tokens,
-            temperature=temperature
+            temperature=temperature,
         )
-        text = response.choices[0].message.content.strip()
+        choice = response.choices[0]
+        text = (choice.message.content or "").strip()
 
-        # If output seems incomplete, request a continuation
-        if text.endswith("...") or len(text.split()) > 0.95 * max_tokens:
-            continuation = client.chat.completions.create(
-                model="openai/gpt-oss-120b",
-                messages=[{"role": "system",
-                           "content": "Continue the previous response clearly in plain English."},
-                          {"role": "assistant", "content": text}],
-                max_tokens=int(max_tokens / 2),
-                temperature=temperature
+        if choice.finish_reason == "length":
+            log_err(f"Warning: response hit max_tokens={max_tokens} (mode={mode}); output may be cut off")
+
+        if not text:
+            # Reasoning models can spend the whole budget thinking and return nothing.
+            raise ValueError(
+                f"Empty response from model '{GROQ_MODEL}' (finish_reason={choice.finish_reason}). "
+                f"Try raising max_tokens."
             )
-            text += " " + continuation.choices[0].message.content.strip()
 
+        call_groq.last_error = ""
         return text
     except Exception as e:
-        print(f"Groq API error: {e}")
+        call_groq.last_error = f"{type(e).__name__}: {e}"
+        log_err(f"Groq API error (model={GROQ_MODEL}): {call_groq.last_error}")
+        return None
+
+
+call_groq.last_error = ""
+
+
+# =====================================================
+# Text helpers
+# =====================================================
+
+def to_plain_text(text):
+    """Strip markdown tables, code fences, headers, bold, and bullets."""
+    if not text:
+        return text
+    text = re.sub(r'```.*?```', '', text, flags=re.DOTALL)
+    kept = []
+    for line in text.splitlines():
+        if line.count('|') >= 2:  # table row or separator
+            continue
+        kept.append(line)
+    text = "\n".join(kept)
+    text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
+    text = re.sub(r'(?m)^\s{0,3}#{1,6}\s*', '', text)
+    text = re.sub(r'(?m)^\s*[-*\u2022]\s+', '', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+
+def parse_json_block(text, opener, closer):
+    """Pull the first JSON array/object out of an LLM reply. Returns None if it can't."""
+    if not text:
+        return None
+    text = re.sub(r'```(?:json)?', '', text)
+    start = text.find(opener)
+    end = text.rfind(closer)
+    if start == -1 or end == -1 or end <= start:
+        return None
+    try:
+        return json.loads(text[start:end + 1])
+    except Exception:
         return None
 
 
@@ -219,12 +279,10 @@ def extract_code(text):
     if not text:
         return ""
 
-    # First try to find fenced python code blocks
-    code_block_match = re.search(r'```(?:python)?\s*\n(.*?)\n```', text, re.DOTALL)
+    code_block_match = re.search(r'```(?:python)?\s*\n?(.*?)```', text, re.DOTALL)
     if code_block_match:
         return code_block_match.group(1).strip()
 
-    # Otherwise, try to extract obvious python lines
     lines = text.split('\n')
     code_lines = []
     for line in lines:
@@ -236,7 +294,7 @@ def extract_code(text):
             stripped.startswith('from '),
             'df.' in stripped or 'df[' in stripped,
             stripped.startswith('result ='),
-            re.match(r'^[\w_]+\s*=', stripped)  # simple assignment
+            re.match(r'^[\w_]+\s*=', stripped)
         ]):
             code_lines.append(line)
     return '\n'.join(code_lines).strip() or text
@@ -247,17 +305,12 @@ def extract_code(text):
 # =====================================================
 
 def safe_execute_code(code, df):
-    """Safely execute pandas code with proper imports and error handling.
-    Post-process the resulting `result` into JSON-able types where possible.
-    """
-    # Remove import statements (we already have pd, np available)
+    """Safely execute pandas code with proper imports and error handling."""
     code_clean = re.sub(r'^\s*(import|from)\s+.*$', '', code, flags=re.MULTILINE)
 
-    # Add matplotlib stubs if user code references plt
     if 'plt.' in code_clean or 'matplotlib' in code_clean:
         code_clean = "import matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\n" + code_clean
 
-    # Limited builtins for safety
     safe_builtins = {
         'print': print,
         'len': len,
@@ -280,7 +333,6 @@ def safe_execute_code(code, df):
         '__import__': __import__,
     }
 
-    # Execution environment
     local_env = {
         "pd": pd,
         "df": df,
@@ -291,8 +343,6 @@ def safe_execute_code(code, df):
     try:
         exec(code_clean, local_env, local_env)
         raw_result = local_env.get("result", None)
-
-        # Post-process common types to be safe & serializable
         processed_result = postprocess_result(raw_result)
         return processed_result, None
     except Exception as e:
@@ -301,23 +351,18 @@ def safe_execute_code(code, df):
 
 def postprocess_result(result):
     """Convert numpy arrays / object arrays / DataFrames / Series to friendly types."""
-    # DataFrame -> keep as DataFrame (caller will handle). Ensure columns and dtypes are simple
     if isinstance(result, pd.DataFrame):
-        # truncate very wide outputs; convert non-stringable columns safely
         return result
 
     if isinstance(result, pd.Series):
         return result
 
-    # numpy array: try to convert to list
     if isinstance(result, np.ndarray):
         try:
             return result.tolist()
         except Exception:
-            # fallback: coerce each element to str
             return [str(x) for x in result.flatten()]
 
-    # If result is list/dict of pandas objects, convert inner pandas to pure types
     if isinstance(result, list):
         new_list = []
         for item in result:
@@ -346,7 +391,6 @@ def postprocess_result(result):
                 new_dict[k] = v
         return new_dict
 
-    # Primitive or anything else: return as-is
     return result
 
 
@@ -395,16 +439,12 @@ def generate_dataframe_chart(df, user_query):
     if df.empty:
         return None
 
-    # Convert index to simple list for labels
     df = df.copy()
 
-    # Determine columns
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     categorical_cols = df.select_dtypes(include=['object', 'string']).columns.tolist()
 
-    # Coerce first numeric column if present
     if not numeric_cols:
-        # Try to coerce any column that looks numeric
         for col in df.columns:
             coerced = pd.to_numeric(df[col], errors='coerce')
             if coerced.notna().sum() > 0:
@@ -412,16 +452,12 @@ def generate_dataframe_chart(df, user_query):
                 df[col] = coerced
                 break
 
-    # Small categorical bar: first categorical vs first numeric
     if len(df) <= 15 and categorical_cols and numeric_cols:
         category_col = categorical_cols[0]
         value_col = numeric_cols[0]
 
-        # Prepare safe series: drop rows with missing category or missing value
         tmp = df[[category_col, value_col]].dropna(subset=[category_col, value_col]).copy()
-        # Convert category labels to string
         tmp[category_col] = tmp[category_col].astype(str).str.strip()
-        # Aggregate in case of duplicates (sum)
         agg = tmp.groupby(category_col, as_index=False, observed=False)[value_col].sum().sort_values(value_col, ascending=False).head(10)
 
         x = [str(x) for x in agg[category_col].tolist()]
@@ -436,13 +472,11 @@ def generate_dataframe_chart(df, user_query):
         }
         return json.dumps(chart_config, indent=2)
 
-    # Trend/line chart for numeric sequence-like data
     elif len(df) > 1 and numeric_cols:
         value_col = numeric_cols[0]
         x_data = df.index.tolist()
         y_data = [float(v) if not pd.isna(v) else None for v in df[value_col].tolist()]
 
-        # replace None with null in JSON by leaving them as None (json dumps will convert)
         chart_config = {
             "title": {"text": f"Trend of {value_col}", "left": "center"},
             "tooltip": {"trigger": "axis"},
@@ -459,7 +493,6 @@ def generate_series_chart(series, user_query):
     if series is None or len(series) == 0:
         return None
 
-    # If index is meaningful, use it, else use sequential labels
     labels = [str(x) for x in series.index.tolist()]
     values = []
     for v in series.tolist():
@@ -495,7 +528,6 @@ def generate_basic_chart(data, user_query):
         }
         return json.dumps(chart_config, indent=2)
     if isinstance(data, list) and len(data) <= 100:
-        # If list of pairs
         if all(isinstance(x, (list, tuple)) and len(x) >= 2 for x in data[:20]):
             keys = [str(x[0]) for x in data]
             vals = [_safe_as_number(x[1]) or 0 for x in data]
@@ -536,8 +568,10 @@ def build_context_from_history(history_json):
         context_lines = []
         for i, item in enumerate(history[-3:]):  # Last 3 queries for context
             query = item.get('query', '')
-            summary = item.get('response', {}).get('summary', '')
-            result = item.get('response', {}).get('result', '')[:200]  # Truncate long results
+            response = item.get('response', {}) or {}
+            # Old stored summaries may contain tables; clean them before reuse
+            summary = to_plain_text(response.get('summary', '') or '')
+            result = (response.get('result', '') or '')[:200]
 
             context_lines.append(f"Previous Q {i + 1}: {query}")
             if summary:
@@ -554,7 +588,6 @@ def build_context_from_history(history_json):
 
 # =====================================================
 # 6 & 9. Generate code, execute, summarize and recommend
-# (kept mostly the same, but more defensive)
 # =====================================================
 
 def apply_pandas_fixes(code):
@@ -562,7 +595,6 @@ def apply_pandas_fixes(code):
     code = code.replace(", include_groups=False", "")
     code = code.replace("include_groups=False", "")
 
-    # 2. Fix to_datetime: 
     if "pd.to_datetime(" in code and "errors=" not in code:
         code = re.sub(r"pd\.to_datetime\(([^)]+)\)", r"pd.to_datetime(\1, errors='coerce')", code)
     elif "pd.to_datetime(" in code:
@@ -591,13 +623,11 @@ def apply_pandas_fixes(code):
 
 
 def generate_analysis_summary(client, user_query, result, error_msg):
-    """Generate human-readable summary of analysis results"""
+    """Generate a plain-text, human-readable summary of analysis results"""
     result_preview = ""
     if result is not None:
         try:
-            if isinstance(result, pd.DataFrame):
-                result_preview = result.head(8).to_string()[:800]
-            elif isinstance(result, pd.Series):
+            if isinstance(result, (pd.DataFrame, pd.Series)):
                 result_preview = result.head(8).to_string()[:800]
             else:
                 result_preview = str(result)[:800]
@@ -608,30 +638,36 @@ def generate_analysis_summary(client, user_query, result, error_msg):
     else:
         result_preview = "No analysis result available"
 
-    result_preview = re.sub(r'[^\x20-\x7E]+', ' ', str(result_preview))
+    result_preview = re.sub(r'[^\x20-\x7E\n]+', ' ', str(result_preview))
 
     prompt_summary = f"""User question: "{user_query}"
-Analysis result: {result_preview}
+Analysis result (for your reference only, do not copy it):
+{result_preview}
 
-Provide a clear, concise explanation of what the result shows. Focus on the key findings and what they mean.
+Write 2 to 4 plain sentences explaining what the result shows and the key findings.
+Rules: plain text only. No tables, no pipes, no lists, no markdown, no column dumps.
+Describe the data in words, mention only the most important values, and never reproduce rows.
 
 Response:"""
 
-    human_text = call_groq(client, prompt_summary, max_tokens=300, temperature=0.7)
+    human_text = call_groq(client, prompt_summary, max_tokens=800, temperature=0.3, mode="prose")
+    human_text = to_plain_text(human_text)
 
     if human_text:
         print("\n=== Analysis Summary ===")
         print(human_text)
         return human_text
-    else:
-        fallback_text = "I analyzed your data. " + ("The results show meaningful patterns." if result is not None else "There was an issue with the analysis.")
-        print("\n=== Analysis Summary ===")
-        print(fallback_text)
-        return fallback_text
+
+    fallback_text = "I analyzed your data. " + (
+        "The results show meaningful patterns." if result is not None else "There was an issue with the analysis."
+    )
+    print("\n=== Analysis Summary ===")
+    print(fallback_text)
+    return fallback_text
 
 
 def generate_recommended_prompts(df, user_query, result, client):
-    """Generate follow-up questions (returns at least 3 fallback ones)"""
+    """Generate follow-up questions (returns fallback ones on failure)"""
     try:
         result_preview = ""
         if result is not None:
@@ -646,22 +682,18 @@ Dataset columns: {list(df.columns)}
 User's question: "{user_query}"
 Analysis result preview: {result_preview}
 
-IMPORTANT: You MUST return exactly 3 follow-up questions as a JSON array of strings.
-
 Return ONLY a JSON array with exactly 3 strings, no explanations:
 ["question 1", "question 2", "question 3"]"""
 
-        prompts_text = call_groq(client, prompt, max_tokens=300, temperature=0.7)
-        if prompts_text:
-            prompts_match = re.search(r'\[.*\]', prompts_text, re.DOTALL)
-            if prompts_match:
-                prompts = json.loads(prompts_match.group())
-                if isinstance(prompts, list) and len(prompts) >= 1:
-                    return prompts[:3]
+        prompts_text = call_groq(client, prompt, max_tokens=800, temperature=0.7, mode="json")
+        prompts = parse_json_block(prompts_text, "[", "]")
+        if isinstance(prompts, list):
+            prompts = [str(p) for p in prompts if isinstance(p, str) and p.strip()]
+            if prompts:
+                return prompts[:3]
     except Exception as e:
         print(f"Could not generate recommended prompts: {e}")
 
-    # Fallback
     return [
         f"What are the trends in {list(df.columns)[0] if len(df.columns) > 0 else 'the data'}?",
         "How are different categories distributed?",
@@ -675,35 +707,42 @@ def generate_mimir_recommends(df, user_query, result, client):
         result_preview = str(result.head(5))[:500] if hasattr(result, 'head') else str(result)[:500]
 
         prompt = f"""As Mimir, the wise data analyst, provide 2 expert recommendations based on this analysis.
-        For each recommendation, you must provide:
-        1. The Recommendation: What should be done.
-        2. Cost of No Action: A simulation of the negative outcome if ignored.
-        3. Cost Reasoning: The logic/mechanics of why that negative outcome occurs.
-        4. Mimir Prediction: A simulation of the positive outcome if implemented.
-        5. Prediction Reasoning: The logic/mechanics of why this positive change will happen.
+For each recommendation, you must provide:
+1. recommendation: What should be done.
+2. cost_of_no_action: The negative outcome if ignored.
+3. cost_reasoning: The logic of why that negative outcome occurs.
+4. prediction: The positive outcome if implemented.
+5. prediction_reasoning: The logic of why this positive change will happen.
 
-        Dataset: {list(df.columns)}
-        Question: "{user_query}"
-        Result: {result_preview}
+Write every value as plain sentences. No markdown, no tables, no lists.
 
-        Return ONLY a JSON array of objects with this structure:
-        [
-          {{
-            "recommendation": "...",
-            "cost_of_no_action": "...",
-            "cost_reasoning": "...",
-            "prediction": "...",
-            "prediction_reasoning": "..."
-          }}
-        ]"""
+Dataset columns: {list(df.columns)}
+Question: "{user_query}"
+Result: {result_preview}
 
-        recs_text = call_groq(client, prompt, max_tokens=1000, temperature=0.6)
-        if recs_text:
-            recs_match = re.search(r'\[.*\]', recs_text, re.DOTALL)
-            if recs_match:
-                return json.loads(recs_match.group())
+Return ONLY a JSON array of objects with this structure:
+[
+  {{
+    "recommendation": "...",
+    "cost_of_no_action": "...",
+    "cost_reasoning": "...",
+    "prediction": "...",
+    "prediction_reasoning": "..."
+  }}
+]"""
+
+        recs_text = call_groq(client, prompt, max_tokens=1500, temperature=0.6, mode="json")
+        recs = parse_json_block(recs_text, "[", "]")
+        if isinstance(recs, list):
+            keys = ["recommendation", "cost_of_no_action", "cost_reasoning", "prediction", "prediction_reasoning"]
+            cleaned = []
+            for r in recs:
+                if isinstance(r, dict):
+                    cleaned.append({k: to_plain_text(str(r.get(k, "") or "")) for k in keys})
+            if cleaned:
+                return cleaned[:2]
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error generating Mimir recommendations: {e}")
     return []
 
 
@@ -712,7 +751,7 @@ def generate_mimir_recommends(df, user_query, result, client):
 # =====================================================
 
 def analyze_data(df, user_query, client, history_json=""):
-    # Build context from history (but don't pass huge history to LLM directly)
+    # Context from previous turns (now sanitized, available for prompts that want it)
     history_context = build_context_from_history(history_json)
 
     csv_preview = df.head(3).to_csv(index=False) if df.shape[0] > 0 else "Empty DataFrame"
@@ -745,16 +784,16 @@ Generate ONLY the Python code that:
 Code only:"""
 
     print("Generating pandas code...")
-    raw_code = call_groq(client, prompt, max_tokens=600, temperature=0.1)
+    raw_code = call_groq(client, prompt, max_tokens=1500, temperature=0.1, mode="code")
 
     if not raw_code:
+        reason = call_groq.last_error or "unknown"
         print("Failed to generate code")
-        return None, None, None, None, None, "Failed to generate code"
+        return "", None, None, None, None, f"Failed to generate code: {reason}"
 
     print("\n=== Raw LLM output ===")
     print(raw_code)
 
-    # Extract and clean code
     code_clean = extract_code(raw_code)
     code_clean = re.sub(r"^```[a-zA-Z]*|```$", "", code_clean.strip(), flags=re.MULTILINE).strip()
     code_clean = apply_pandas_fixes(code_clean)
@@ -770,8 +809,6 @@ Code only:"""
 
         if result is None and error_msg:
             print(f"Error executing pandas code: {error_msg}")
-
-            # Retry with a very simple fallback pattern if possible
             print("\nAttempting to fix the error with simplified code...")
             retry_prompt = f"""The previous code failed with this error: {error_msg}
 
@@ -786,7 +823,7 @@ Generate SIMPLE, corrected Python code that:
 
 Corrected code only:"""
 
-            retry_code = call_groq(client, retry_prompt, max_tokens=400, temperature=0.1)
+            retry_code = call_groq(client, retry_prompt, max_tokens=1200, temperature=0.1, mode="code")
             if retry_code:
                 retry_clean = extract_code(retry_code)
                 retry_clean = re.sub(r"^```[a-zA-Z]*|```$", "", retry_clean.strip(), flags=re.MULTILINE).strip()
@@ -808,93 +845,81 @@ Corrected code only:"""
         print("No executable code detected")
         error_msg = "No executable code generated"
 
-    # Generate summary and recommendations
     summary = generate_analysis_summary(client, user_query, result, error_msg)
     recommended_prompts = generate_recommended_prompts(df, user_query, result, client)
     mimir_recommends = generate_mimir_recommends(df, user_query, result, client)
-
-    # Chart JSON generation
     chart_json = generate_chart_json(user_query, result)
 
     return summary, recommended_prompts, mimir_recommends, chart_json, result, error_msg
 
 
 # =====================================================
-# 10. Entry point - supports history passed as @<tempfile>
+# 10. Entry point - long-running service driven by Rust over stdin/stdout
 # =====================================================
 
-def read_history_arg(arg: str) -> str:
-    """If arg starts with '@', treat as file path and read JSON from it.
-    Otherwise treat as the JSON string itself.
-    """
-    if not arg:
-        return "[]"
-    if arg.startswith("@"):
-        path = arg[1:]
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return f.read()
-        except Exception as e:
-            print(f"Failed to read history file {path}: {e}")
-            return "[]"
-    return arg
+def emit(response):
+    print("===RESULT_START===")
+    print(json.dumps(response))
+    print("===RESULT_END===", flush=True)
+
 
 def main_loop():
-
     sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8')
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
     client = None
-    # Pre-initialize these so they persist in memory
+    current_key = None
+
     print("PYTHON_READY", flush=True)
 
     for line in sys.stdin:
         try:
             input_data = json.loads(line)
-            
+
             csv_path = input_data.get("csv_path")
             query = input_data.get("query")
             history_json = input_data.get("history", "[]")
-            api_key = input_data.get("api_key")
+            api_key = (input_data.get("api_key") or "").strip().strip('"').strip("'")
 
-            if api_key:
-                os.environ["GROQ_API_KEY"] = api_key
-            
-            if client is None:
-                client = load_groq_client()
+            # Recreate the client whenever the key changes (e.g. after a token refresh)
+            if client is None or (api_key and api_key != current_key):
+                client = load_groq_client(api_key or None)
+                current_key = api_key
 
             df = load_clean_csv(csv_path)
             summary, rec_prompts, mimir_recs, chart, result, error = analyze_data(
                 df, query, client, history_json
             )
 
-            response = {
-                "raw_output": str(result)[:1000] if result is not None else "", 
-                "code": "Check Python Logs",                                    
+            # The Rust side needs a string here, never null
+            if not summary:
+                summary = f"Analysis failed: {error}" if error else ""
+
+            emit({
+                "raw_output": str(result)[:1000] if result is not None else "",
+                "code": "Check Python Logs",
                 "result": "success" if error is None else "error",
                 "summary": summary,
-                "recommended_prompts": rec_prompts,
-                "mimir_recommends": mimir_recs,
+                "recommended_prompts": rec_prompts or [],
+                "mimir_recommends": mimir_recs or [],
                 "chart": chart,
                 "error": error
-            }
-            
-            print("===RESULT_START===")
-            print(json.dumps(response))
-            print("===RESULT_END===", flush=True)
+            })
 
         except Exception as e:
-            err_resp = {
-                "summary": "Encoding or Parsing Error",
+            log_err(f"Unhandled error in main_loop: {type(e).__name__}: {e}")
+            emit({
+                "summary": f"Error: {e}",
                 "raw_output": "",
                 "code": "",
                 "result": "error",
+                "recommended_prompts": [],
+                "mimir_recommends": [],
+                "chart": None,
                 "error": str(e)
-            }
-            print("===RESULT_START===")
-            print(json.dumps(err_resp))
-            print("===RESULT_END===", flush=True)
+            })
+
 
 if __name__ == "__main__":
     main_loop()
