@@ -688,8 +688,12 @@ export default function MimirApp() {
   const loadCurrentChat = async () => {
     try {
       const history = await invoke<HistoryItem[]>("get_history")
-      const reversedHistory = history.reverse().map((item) => ({
+      const reversedHistory = history.reverse().map((item, i) => ({
         ...item,
+        id: item.id || i + 1, // old items saved without an id
+        timestamp: isNaN(Date.parse(item.timestamp))
+          ? item.timestamp
+          : new Date(item.timestamp).toLocaleTimeString(),
         showRecommendedPrompts: item.showRecommendedPrompts ?? true,
       }))
       setHistory(reversedHistory)
@@ -794,6 +798,7 @@ export default function MimirApp() {
 
       setHistory((prev) => [newItem, ...prev])
       setQuery("")
+      await loadChatList()
       setTimeout(() => {
         historyContainerRef.current?.scrollTo({ top: 0, behavior: "smooth" })
       }, 100)
@@ -2209,7 +2214,7 @@ const renderMimirRecommends = (recommendations?: MimirRecommendation[]) => {
                             <FileText className="w-5 h-5 text-primary" />
                             <h3 className="font-bold text-foreground">Summary</h3>
                           </div>
-                          <p className="text-foreground leading-relaxed break-words bg-secondary/40 border rounded p-4">
+                          <p className="text-foreground leading-relaxed break-words whitespace-pre-line bg-secondary/40 border rounded p-4">
                             {item.response.summary}
                           </p>
                         </div>

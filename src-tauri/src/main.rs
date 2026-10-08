@@ -199,6 +199,8 @@ struct AppState {
 
 #[derive(Serialize, Deserialize, Clone)]
 struct QueryHistory {
+    #[serde(default)]
+    id: u64,
     query: String,
     response: AnalysisResponse,
     timestamp: String,
@@ -593,6 +595,28 @@ async fn analyze_query(
         
         parsed 
     }; 
+
+    let entry = QueryHistory {
+        id: chrono::Local::now().timestamp_millis() as u64,
+        query: query.clone(),
+        response: response.clone(),
+        timestamp: chrono::Local::now().to_rfc3339(),
+    };
+
+    let (chat_name, chat_snapshot) = {
+        let current = state.current_chat.lock().unwrap().clone();
+        let mut chats = state.chats.lock().unwrap();
+        let chat = chats.get_mut(&current).ok_or("Chat not found")?;
+        chat.history.push(entry);
+        (current, chat.clone())
+    };
+
+    let app = app_handle.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Err(e) = save_chat_data_blocking(&app, &chat_name, &chat_snapshot) {
+            eprintln!("Warning: Could not save chat history: {}", e);
+        }
+    });
 
     Ok(response)
 }
