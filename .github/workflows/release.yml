@@ -4,7 +4,42 @@ on:
     tags: ['v*']
 
 jobs:
+  # ------------------------------------------------------------------
+  # TESTS: gate the whole release. If any Rust test fails on either
+  # platform, nothing gets built, signed or uploaded.
+  # ------------------------------------------------------------------
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt update
+          sudo apt install -y libappindicator3-dev librsvg2-dev libgtk-3-dev libwebkit2gtk-4.1-dev libglib2.0-dev patchelf
+
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # tauri::generate_context!() embeds the built frontend at compile time,
+      # so the frontend must exist before cargo can compile the test binary.
+      - name: Build frontend
+        run: npm install && npm run build
+
+      - name: Run Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
   build-linux:
+    needs: [test]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -34,13 +69,86 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
 
+      # ------------------------------------------------------------------
+      # LINUX SIGNING. Sectigo/Authenticode certificates only apply to
+      # Windows binaries, so Linux packages get detached GPG signatures
+      # (.asc) that users check against the published public key.
+      # Needs repo secrets: GPG_PRIVATE_KEY (armored) and GPG_PASSPHRASE.
+      # ------------------------------------------------------------------
+      - name: Sign Linux packages (GPG)
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          BUNDLE=src-tauri/target/release/bundle
+          mkdir -p release-linux
+
+          DEB=$(find "$BUNDLE/deb" -name '*.deb' -print -quit)
+          APPIMAGE=$(find "$BUNDLE/appimage" -name '*.AppImage' -print -quit)
+          if [ -z "$DEB" ]; then
+            echo '::error::No .deb found. Check that bundle.targets in tauri.conf.json includes "deb".'
+            exit 1
+          fi
+          if [ -z "$APPIMAGE" ]; then
+            echo '::error::No .AppImage found.'
+            exit 1
+          fi
+          cp "$DEB" release-linux/
+
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          FPR=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/ {print $10; exit}')
+
+          for f in "$DEB" "$APPIMAGE"; do
+            echo "$GPG_PASSPHRASE" | gpg --batch --yes --pinentry-mode loopback --passphrase-fd 0 \
+              --local-user "$FPR" --armor --detach-sign \
+              --output "release-linux/$(basename "$f").asc" "$f"
+          done
+
+          gpg --armor --export "$FPR" > release-linux/mimir-signing-key.asc
+
+      # Verify instead of trusting: a fresh keyring that only knows the
+      # PUBLIC key must accept every signature, like a user's machine would.
+      - name: Verify Linux signatures
+        run: |
+          set -euo pipefail
+          BUNDLE=src-tauri/target/release/bundle
+          export GNUPGHOME="$(mktemp -d)"
+          chmod 700 "$GNUPGHOME"
+          gpg --batch --import release-linux/mimir-signing-key.asc
+
+          for sig in release-linux/*.asc; do
+            name=$(basename "$sig" .asc)
+            if [ "$name" = "mimir-signing-key" ]; then continue; fi
+            target=$(find release-linux "$BUNDLE" -name "$name" -print -quit)
+            echo "Verifying $name"
+            gpg --batch --verify "$sig" "$target"
+          done
+
+          dpkg-deb --info release-linux/*.deb > /dev/null
+          echo "All Linux packages are signed and valid"
+
+      # Unchanged: the updater step still sees exactly the AppImage it saw before.
       - name: Upload Linux Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: linux-build
           path: src-tauri/target/release/bundle/appimage/
 
+      - name: Upload signed Linux packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-signed
+          path: release-linux/
+
+      - name: Clean up Linux signing key
+        if: always()
+        run: |
+          gpgconf --kill gpg-agent || true
+          rm -rf "$HOME/.gnupg"
+
   build-windows:
+    needs: [test]
     runs-on: windows-latest
     permissions:
       contents: 'read'
@@ -229,7 +337,7 @@ jobs:
 
   upload-updates:
     runs-on: ubuntu-latest
-    needs: [build-linux, build-windows]
+    needs: [test, build-linux, build-windows]
     steps:
       - uses: actions/checkout@v4
       - name: Extract version

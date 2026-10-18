@@ -120,42 +120,104 @@ fn save_chat_data_blocking(
     Ok(())
 }
 
-fn save_login(app_handle: &AppHandle, login_info: &RefreshToken) -> Result<(), String> {
-    let login_info_json = serde_json::to_string_pretty(login_info)
-        .map_err(|e| format!("Failed to serialize login info: {}", e))?;
+// ========== SAVED LOGIN (OS credential store) ==========
+//
+// The refresh token is kept in the operating system's credential store
+// (Windows Credential Manager, macOS Keychain, Secret Service on Linux)
+// instead of a plaintext JSON file. The OS encrypts it with a key tied to the
+// user's login, so there is no key for the app to store next to the data.
+// If no credential store is available (e.g. a headless Linux box), the login
+// simply isn't remembered and the user signs in again next time.
 
-    let app_dir = app_handle
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+const KEYRING_SERVICE: &str = "mimir-analysis";
+const KEYRING_ACCOUNT: &str = "refresh-token";
+const LEGACY_LOGIN_FILE: &str = "logininfo.json";
 
-    let login_path = app_dir.join("logininfo.json");
+fn credential_entry() -> Result<keyring::Entry, String> {
+    keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
+        .map_err(|e| format!("Failed to access credential store: {}", e))
+}
 
-    std::fs::write(&login_path, login_info_json)
-        .map_err(|e| format!("Failed to save login info: {}", e))?;
+fn store_refresh_token(entry: &keyring::Entry, token: &str) -> Result<(), String> {
+    entry
+        .set_password(token)
+        .map_err(|e| format!("Failed to save login to credential store: {}", e))
+}
 
-    Ok(())
+fn read_refresh_token(entry: &keyring::Entry) -> Result<Option<String>, String> {
+    match entry.get_password() {
+        Ok(token) => Ok(Some(token)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(format!("Failed to read login from credential store: {}", e)),
+    }
+}
+
+fn clear_refresh_token(entry: &keyring::Entry) -> Result<(), String> {
+    match entry.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(format!("Failed to remove login from credential store: {}", e)),
+    }
+}
+
+/// Upgrade path for versions that saved the token as plaintext `logininfo.json`.
+/// The token is moved into the credential store and the plaintext file is
+/// always deleted. Returns Ok(true) if the token was moved, Ok(false) if there
+/// was nothing to move or it couldn't be stored (the user just signs in again).
+fn migrate_legacy_login_file(path: &Path, entry: &keyring::Entry) -> Result<bool, String> {
+    if !path.exists() {
+        return Ok(false);
+    }
+
+    let data = fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read old login file: {}", e))?;
+
+    let stored = match serde_json::from_str::<RefreshToken>(&data) {
+        Ok(old) => store_refresh_token(entry, &old.refresh_token).is_ok(),
+        Err(_) => false,
+    };
+
+    fs::remove_file(path).map_err(|e| format!("Failed to delete old login file: {}", e))?;
+    Ok(stored)
+}
+
+fn save_login(_app_handle: &AppHandle, login_info: &RefreshToken) -> Result<(), String> {
+    store_refresh_token(&credential_entry()?, &login_info.refresh_token)
 }
 
 fn load_login(app_handle: &AppHandle) -> Result<RefreshToken, String> {
+    let entry = credential_entry()?;
+
     let app_dir = app_handle
         .path()
         .app_data_dir()
         .map_err(|e| format!("Failed to get app data dir: {}", e))?;
 
-    let login_path = app_dir.join("logininfo.json");
-
-    if !login_path.exists() {
-        return Err("No saved login found".to_string());
+    match migrate_legacy_login_file(&app_dir.join(LEGACY_LOGIN_FILE), &entry) {
+        Ok(true) => println!("Moved saved login into the OS credential store"),
+        Ok(false) => {}
+        Err(e) => println!("Warning: could not migrate old login file: {}", e),
     }
 
-    let data = std::fs::read_to_string(&login_path)
-        .map_err(|e| format!("Failed to read login info: {}", e))?;
+    match read_refresh_token(&entry)? {
+        Some(refresh_token) => Ok(RefreshToken { refresh_token }),
+        None => Err("No saved login found".to_string()),
+    }
+}
 
-    let login_info: RefreshToken = serde_json::from_str(&data)
-        .map_err(|e| format!("Failed to deserialize login info: {}", e))?;
+fn delete_login(app_handle: &AppHandle) -> Result<(), String> {
+    clear_refresh_token(&credential_entry()?)?;
 
-    Ok(login_info)
+    let legacy_path = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?
+        .join(LEGACY_LOGIN_FILE);
+
+    if legacy_path.exists() {
+        fs::remove_file(&legacy_path)
+            .map_err(|e| format!("Failed to delete old login file: {}", e))?;
+    }
+    Ok(())
 }
 
 fn load_chat_data_blocking(
@@ -783,16 +845,8 @@ async fn login(
         .await
         .map_err(|e| format!("Failed to read response: {}", e))?;
 
-    println!("=== RAW LOGIN RESPONSE ===");
-    println!("{}", response_text);
-    println!("==========================");
-
-    let login_response: LoginResponse = serde_json::from_str(&response_text).map_err(|e| {
-        format!(
-            "Failed to parse login response: {} | Raw response: {}",
-            e, response_text
-        )
-    })?;
+    let login_response: LoginResponse = serde_json::from_str(&response_text)
+        .map_err(|e| format!("Failed to parse login response: {}", e))?;
 
     let mut token_guard = state.jwt_token.lock().unwrap();
     *token_guard = login_response.access_token.clone();
@@ -838,16 +892,8 @@ async fn refresh_token(
         .await
         .map_err(|e| format!("Failed to read response: {}", e))?;
 
-    println!("=== RAW REFRESH RESPONSE ===");
-    println!("{}", response_text);
-    println!("============================");
-
-    let login_response: LoginResponse = serde_json::from_str(&response_text).map_err(|e| {
-        format!(
-            "Failed to parse refresh response: {} | Raw response: {}",
-            e, response_text
-        )
-    })?;
+    let login_response: LoginResponse = serde_json::from_str(&response_text)
+        .map_err(|e| format!("Failed to parse refresh response: {}", e))?;
 
     let mut token_guard = state.jwt_token.lock().unwrap();
     *token_guard = login_response.access_token.clone();
@@ -879,16 +925,8 @@ async fn logout(app_handle: AppHandle, state: State<'_, AppState>) -> Result<Str
     let mut token_guard = state.jwt_token.lock().unwrap();
     *token_guard = String::new();
 
-    let app_dir = app_handle
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
-
-    let login_path = app_dir.join("logininfo.json");
-
-    if login_path.exists() {
-        std::fs::remove_file(&login_path)
-            .map_err(|e| format!("Failed to delete login info: {}", e))?;
+    if let Err(e) = delete_login(&app_handle) {
+        println!("Warning: {}", e);
     }
 
     Ok("Logged out successfully".to_string())
@@ -954,7 +992,12 @@ fn sanitize_filename(filename: &str) -> String {
         
         let max_stem_len = 255 - ext.len() - if ext.is_empty() { 0 } else { 1 };
         let truncated_stem = if stem.len() > max_stem_len {
-            &stem[0..max_stem_len]
+            // Cut on a char boundary: slicing mid-character panics on non-ASCII names.
+            let mut end = max_stem_len;
+            while !stem.is_char_boundary(end) {
+                end -= 1;
+            }
+            &stem[..end]
         } else {
             stem
         };
@@ -1713,4 +1756,527 @@ fn load_chats_sync(
     }
 
     Ok(())
+}
+
+// ========== TESTS ==========
+// Append this block to the bottom of src-tauri/src/main.rs.
+// Needs in src-tauri/Cargo.toml:
+//
+//   [dev-dependencies]
+//   tempfile = "3"
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::future::Future;
+    use tempfile::TempDir;
+
+    fn block_on<F: Future>(f: F) -> F::Output {
+        tauri::async_runtime::block_on(f)
+    }
+
+    fn write_file(dir: &TempDir, name: &str, contents: &str) -> PathBuf {
+        let path = dir.path().join(name);
+        fs::write(&path, contents).unwrap();
+        path
+    }
+
+    // ---------------------------------------------------------------
+    // sanitize_filename
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn sanitize_keeps_normal_names_unchanged() {
+        assert_eq!(sanitize_filename("sales_2024.csv"), "sales_2024.csv");
+        assert_eq!(sanitize_filename("my report (final).xlsx"), "my report (final).xlsx");
+    }
+
+    #[test]
+    fn sanitize_replaces_every_windows_forbidden_character() {
+        assert_eq!(
+            sanitize_filename(r#"a<b>c:d"e|f?g*h\i/j.csv"#),
+            "a_b_c_d_e_f_g_h_i_j.csv"
+        );
+    }
+
+    #[test]
+    fn sanitize_neutralises_path_traversal() {
+        let out = sanitize_filename("../../etc/passwd");
+        assert!(!out.contains('/'));
+        assert!(!out.contains('\\'));
+
+        let out = sanitize_filename(r"..\..\Windows\System32\evil.dll");
+        assert!(!out.contains('/'));
+        assert!(!out.contains('\\'));
+    }
+
+    #[test]
+    fn sanitize_trims_surrounding_whitespace() {
+        assert_eq!(sanitize_filename("   data.csv \t"), "data.csv");
+    }
+
+    #[test]
+    fn sanitize_empty_or_blank_input_gets_placeholder() {
+        assert_eq!(sanitize_filename(""), "unnamed_file");
+        assert_eq!(sanitize_filename("    "), "unnamed_file");
+    }
+
+    #[test]
+    fn sanitize_truncates_long_name_but_keeps_extension() {
+        let long = format!("{}.csv", "a".repeat(300));
+        let out = sanitize_filename(&long);
+        assert_eq!(out.len(), 255);
+        assert!(out.ends_with(".csv"));
+    }
+
+    #[test]
+    fn sanitize_truncates_long_name_without_extension() {
+        let out = sanitize_filename(&"b".repeat(400));
+        assert_eq!(out.len(), 255);
+    }
+
+    #[test]
+    fn sanitize_does_not_panic_on_long_multibyte_names() {
+        // 'é' is 2 bytes, so a 255-byte cut lands in the middle of a character.
+        let out = sanitize_filename(&"é".repeat(200));
+        assert!(out.len() <= 255);
+        assert!(out.chars().all(|c| c == 'é'));
+    }
+
+    // ---------------------------------------------------------------
+    // get_unique_filename
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn unique_filename_returns_original_when_free() {
+        let dir = TempDir::new().unwrap();
+        assert_eq!(get_unique_filename(dir.path(), "data.csv"), "data.csv");
+    }
+
+    #[test]
+    fn unique_filename_adds_counter_on_collision() {
+        let dir = TempDir::new().unwrap();
+        write_file(&dir, "data.csv", "x");
+        assert_eq!(get_unique_filename(dir.path(), "data.csv"), "data_1.csv");
+    }
+
+    #[test]
+    fn unique_filename_skips_counters_that_are_taken() {
+        let dir = TempDir::new().unwrap();
+        write_file(&dir, "data.csv", "x");
+        write_file(&dir, "data_1.csv", "x");
+        write_file(&dir, "data_2.csv", "x");
+        assert_eq!(get_unique_filename(dir.path(), "data.csv"), "data_3.csv");
+    }
+
+    #[test]
+    fn unique_filename_handles_names_without_extension() {
+        let dir = TempDir::new().unwrap();
+        write_file(&dir, "README", "x");
+        assert_eq!(get_unique_filename(dir.path(), "README"), "README_1");
+    }
+
+    // ---------------------------------------------------------------
+    // parse_python_output
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn parse_extracts_summary() {
+        let stdout = "noise\n=== ANALYSIS_SUMMARY_START ===\n  Sales grew 12%.  \n=== ANALYSIS_SUMMARY_END ===\nmore noise";
+        let r = parse_python_output(stdout, "");
+        assert_eq!(r.summary, "Sales grew 12%.");
+        assert!(r.error.is_none());
+        assert_eq!(r.raw_output, stdout);
+    }
+
+    #[test]
+    fn parse_extracts_recommended_prompts() {
+        let stdout = "=== RECOMMENDED_PROMPTS_START ===\n[\"Show trend\", \"Find outliers\"]\n=== RECOMMENDED_PROMPTS_END ===";
+        let r = parse_python_output(stdout, "");
+        assert_eq!(
+            r.recommended_prompts,
+            Some(vec!["Show trend".to_string(), "Find outliers".to_string()])
+        );
+    }
+
+    #[test]
+    fn parse_ignores_malformed_prompts_json() {
+        let stdout = "=== RECOMMENDED_PROMPTS_START ===\nnot json\n=== RECOMMENDED_PROMPTS_END ===";
+        let r = parse_python_output(stdout, "");
+        assert!(r.recommended_prompts.is_none());
+    }
+
+    #[test]
+    fn parse_extracts_mimir_recommendations() {
+        let stdout = r#"=== MIMIR_RECOMMENDS_START ===
+[{"recommendation":"Reorder stock","cost_of_no_action":"5000","cost_reasoning":"lost sales","prediction":"stock out in 2 weeks","prediction_reasoning":"trend"}]
+=== MIMIR_RECOMMENDS_END ==="#;
+        let r = parse_python_output(stdout, "");
+        let recs = r.mimir_recommends.expect("recommendations should parse");
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].recommendation, "Reorder stock");
+        assert_eq!(recs[0].cost_of_no_action, "5000");
+    }
+
+    #[test]
+    fn parse_keeps_chart_data_but_drops_literal_null() {
+        let with_chart = "=== CHART_DATA_START ===\n{\"type\":\"bar\"}\n=== CHART_DATA_END ===";
+        assert_eq!(
+            parse_python_output(with_chart, "").chart,
+            Some("{\"type\":\"bar\"}".to_string())
+        );
+
+        let null_chart = "=== CHART_DATA_START ===\nnull\n=== CHART_DATA_END ===";
+        assert!(parse_python_output(null_chart, "").chart.is_none());
+    }
+
+    #[test]
+    fn parse_uses_stderr_as_error_when_no_error_section() {
+        let r = parse_python_output("", "Traceback: boom");
+        assert_eq!(r.error.as_deref(), Some("Traceback: boom"));
+    }
+
+    #[test]
+    fn parse_error_section_overrides_stderr() {
+        let stdout = "=== ERROR_INFO_START ===\nColumn not found\n=== ERROR_INFO_END ===";
+        let r = parse_python_output(stdout, "some stderr");
+        assert_eq!(r.error.as_deref(), Some("Column not found"));
+    }
+
+    #[test]
+    fn parse_normalises_windows_line_endings() {
+        let stdout = "=== ANALYSIS_SUMMARY_START ===\r\nline one\r\nline two\r\n=== ANALYSIS_SUMMARY_END ===\r\n";
+        let r = parse_python_output(stdout, "");
+        assert_eq!(r.summary, "line one\nline two");
+        assert!(!r.raw_output.contains('\r'));
+    }
+
+    #[test]
+    fn parse_missing_end_marker_yields_empty_section() {
+        let stdout = "=== ANALYSIS_SUMMARY_START ===\nnever closed";
+        let r = parse_python_output(stdout, "");
+        assert_eq!(r.summary, "");
+    }
+
+    #[test]
+    fn parse_empty_output_gives_empty_response() {
+        let r = parse_python_output("", "");
+        assert_eq!(r.summary, "");
+        assert!(r.chart.is_none());
+        assert!(r.error.is_none());
+        assert!(r.recommended_prompts.is_none());
+        assert!(r.mimir_recommends.is_none());
+    }
+
+    // ---------------------------------------------------------------
+    // serde models (the wire format shared with the API and the Python side)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn login_response_reads_camel_case_api_payload() {
+        let json = r#"{
+            "accessToken": "access123",
+            "refreshToken": "refresh456",
+            "username": "pavel",
+            "email": "pavel@example.com",
+            "roles": ["USER", "ADMIN"],
+            "type": "Bearer"
+        }"#;
+        let r: LoginResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(r.access_token, "access123");
+        assert_eq!(r.refresh_token, "refresh456");
+        assert_eq!(r.username, "pavel");
+        assert_eq!(r.roles, vec!["USER", "ADMIN"]);
+        assert_eq!(r.token_type, "Bearer");
+    }
+
+    #[test]
+    fn login_response_rejects_payload_without_tokens() {
+        let json = r#"{"username":"pavel","email":"e","roles":[],"type":"Bearer"}"#;
+        assert!(serde_json::from_str::<LoginResponse>(json).is_err());
+    }
+
+    #[test]
+    fn refresh_token_serialises_with_camel_case_key() {
+        let json = serde_json::to_string(&RefreshToken {
+            refresh_token: "abc".to_string(),
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"refreshToken":"abc"}"#);
+    }
+
+    #[test]
+    fn analysis_response_needs_only_summary() {
+        let r: AnalysisResponse = serde_json::from_str(r#"{"summary":"ok"}"#).unwrap();
+        assert_eq!(r.summary, "ok");
+        assert_eq!(r.raw_output, "");
+        assert_eq!(r.code, "");
+        assert_eq!(r.result, "");
+        assert!(r.chart.is_none());
+        assert!(r.error.is_none());
+        assert!(r.recommended_prompts.is_none());
+        assert!(r.mimir_recommends.is_none());
+    }
+
+    #[test]
+    fn analysis_response_without_summary_is_rejected() {
+        assert!(serde_json::from_str::<AnalysisResponse>(r#"{"raw_output":"x"}"#).is_err());
+    }
+
+    #[test]
+    fn query_history_id_defaults_to_zero_for_old_saved_chats() {
+        let json = r#"{
+            "query": "total sales?",
+            "response": {"summary": "42"},
+            "timestamp": "2026-01-01T00:00:00+00:00"
+        }"#;
+        let h: QueryHistory = serde_json::from_str(json).unwrap();
+        assert_eq!(h.id, 0);
+        assert_eq!(h.query, "total sales?");
+    }
+
+    #[test]
+    fn chat_data_survives_a_save_and_load_roundtrip() {
+        let chat = ChatData {
+            history: vec![QueryHistory {
+                id: 7,
+                query: "q".to_string(),
+                response: AnalysisResponse {
+                    raw_output: String::new(),
+                    code: "df.sum()".to_string(),
+                    result: "10".to_string(),
+                    summary: "ten".to_string(),
+                    chart: None,
+                    error: None,
+                    recommended_prompts: Some(vec!["next".to_string()]),
+                    mimir_recommends: None,
+                },
+                timestamp: "2026-01-01T00:00:00+00:00".to_string(),
+            }],
+            csv_path: Some("/data/file.csv".to_string()),
+        };
+
+        let json = serde_json::to_string_pretty(&chat).unwrap();
+        let loaded: ChatData = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(loaded.csv_path.as_deref(), Some("/data/file.csv"));
+        assert_eq!(loaded.history.len(), 1);
+        assert_eq!(loaded.history[0].id, 7);
+        assert_eq!(loaded.history[0].response.code, "df.sum()");
+        assert_eq!(
+            loaded.history[0].response.recommended_prompts,
+            Some(vec!["next".to_string()])
+        );
+    }
+
+    #[test]
+    fn merge_config_deserialises_from_frontend_payload() {
+        let json = r#"{"file_path":"/tmp/b.csv","merge_column":"id","merge_type":"left"}"#;
+        let c: MergeConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(c.file_path, "/tmp/b.csv");
+        assert_eq!(c.merge_column, "id");
+        assert_eq!(c.merge_type, "left");
+    }
+
+    // ---------------------------------------------------------------
+    // app state
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn app_state_starts_empty_and_logged_out() {
+        let s = AppState::default();
+        assert!(s.chats.lock().unwrap().is_empty());
+        assert!(s.current_chat.lock().unwrap().is_empty());
+        assert!(s.jwt_token.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn python_process_starts_not_running() {
+        let p = PythonProcess::default();
+        assert!(p.process.lock().unwrap().is_none());
+    }
+
+    // ---------------------------------------------------------------
+    // get_api_key (only the path that needs no network)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn get_api_key_refuses_an_empty_token_without_calling_the_network() {
+        let err = block_on(get_api_key(String::new())).unwrap_err();
+        assert_eq!(err, "No JWT token provided");
+    }
+
+    // ---------------------------------------------------------------
+    // load_csv_info
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn load_csv_info_reports_missing_file() {
+        let err = block_on(load_csv_info("/definitely/not/here.csv".to_string())).unwrap_err();
+        assert_eq!(err, "File does not exist");
+    }
+
+    #[test]
+    fn load_csv_info_returns_header_plus_first_five_rows() {
+        let dir = TempDir::new().unwrap();
+        let mut csv = String::from("id,name\n");
+        for i in 1..=10 {
+            csv.push_str(&format!("{},user{}\n", i, i));
+        }
+        let path = write_file(&dir, "people.csv", &csv);
+
+        let rows = block_on(load_csv_info(path.to_string_lossy().to_string())).unwrap();
+
+        assert_eq!(rows.len(), 6, "header + 5 data rows");
+        assert_eq!(rows[0], vec!["id", "name"]);
+        assert_eq!(rows[1], vec!["1", "user1"]);
+        assert_eq!(rows[5], vec!["5", "user5"]);
+    }
+
+    #[test]
+    fn load_csv_info_handles_files_shorter_than_five_rows() {
+        let dir = TempDir::new().unwrap();
+        let path = write_file(&dir, "small.csv", "a,b\n1,2\n3,4\n");
+
+        let rows = block_on(load_csv_info(path.to_string_lossy().to_string())).unwrap();
+
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[2], vec!["3", "4"]);
+    }
+
+    #[test]
+    fn load_csv_info_handles_header_only_file() {
+        let dir = TempDir::new().unwrap();
+        let path = write_file(&dir, "headers.csv", "a,b,c\n");
+
+        let rows = block_on(load_csv_info(path.to_string_lossy().to_string())).unwrap();
+
+        assert_eq!(rows, vec![vec!["a", "b", "c"]]);
+    }
+
+    #[test]
+    fn load_csv_info_keeps_quoted_commas_inside_one_field() {
+        let dir = TempDir::new().unwrap();
+        let path = write_file(&dir, "quoted.csv", "name,city\n\"Doe, Jane\",Graz\n");
+
+        let rows = block_on(load_csv_info(path.to_string_lossy().to_string())).unwrap();
+
+        assert_eq!(rows[1], vec!["Doe, Jane", "Graz"]);
+    }
+
+    #[test]
+    fn load_csv_info_extension_check_is_case_insensitive() {
+        let dir = TempDir::new().unwrap();
+        let path = write_file(&dir, "UPPER.CSV", "a\n1\n");
+
+        let rows = block_on(load_csv_info(path.to_string_lossy().to_string())).unwrap();
+
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn load_csv_info_rejects_unsupported_extensions() {
+        let dir = TempDir::new().unwrap();
+        let path = write_file(&dir, "notes.txt", "hello");
+
+        let err = block_on(load_csv_info(path.to_string_lossy().to_string())).unwrap_err();
+
+        assert_eq!(err, "Unsupported file type: .txt");
+    }
+
+    // ---------------------------------------------------------------
+    // saved login (credential store, using keyring's in-memory mock)
+    // ---------------------------------------------------------------
+
+    fn mock_entry() -> keyring::Entry {
+        keyring::Entry::new_with_credential(Box::new(keyring::mock::MockCredential::default()))
+    }
+
+    #[test]
+    fn credential_store_roundtrip() {
+        let entry = mock_entry();
+        store_refresh_token(&entry, "refresh-abc").unwrap();
+        assert_eq!(read_refresh_token(&entry).unwrap().as_deref(), Some("refresh-abc"));
+    }
+
+    #[test]
+    fn credential_store_overwrites_previous_token() {
+        let entry = mock_entry();
+        store_refresh_token(&entry, "old").unwrap();
+        store_refresh_token(&entry, "new").unwrap();
+        assert_eq!(read_refresh_token(&entry).unwrap().as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn reading_an_empty_credential_store_gives_none_not_an_error() {
+        assert_eq!(read_refresh_token(&mock_entry()).unwrap(), None);
+    }
+
+    #[test]
+    fn clearing_removes_the_token() {
+        let entry = mock_entry();
+        store_refresh_token(&entry, "abc").unwrap();
+        clear_refresh_token(&entry).unwrap();
+        assert_eq!(read_refresh_token(&entry).unwrap(), None);
+    }
+
+    #[test]
+    fn clearing_when_nothing_is_stored_is_fine() {
+        assert!(clear_refresh_token(&mock_entry()).is_ok());
+    }
+
+    #[test]
+    fn migration_moves_plaintext_token_into_store_and_deletes_the_file() {
+        let dir = TempDir::new().unwrap();
+        let path = write_file(&dir, "logininfo.json", r#"{"refreshToken":"legacy-token"}"#);
+        let entry = mock_entry();
+
+        let moved = migrate_legacy_login_file(&path, &entry).unwrap();
+
+        assert!(moved);
+        assert!(!path.exists(), "plaintext file must be gone");
+        assert_eq!(read_refresh_token(&entry).unwrap().as_deref(), Some("legacy-token"));
+    }
+
+    #[test]
+    fn migration_does_nothing_when_there_is_no_legacy_file() {
+        let dir = TempDir::new().unwrap();
+        let entry = mock_entry();
+
+        let moved = migrate_legacy_login_file(&dir.path().join("logininfo.json"), &entry).unwrap();
+
+        assert!(!moved);
+        assert_eq!(read_refresh_token(&entry).unwrap(), None);
+    }
+
+    #[test]
+    fn migration_deletes_a_corrupt_legacy_file_without_storing_anything() {
+        let dir = TempDir::new().unwrap();
+        let path = write_file(&dir, "logininfo.json", "not json at all");
+        let entry = mock_entry();
+
+        let moved = migrate_legacy_login_file(&path, &entry).unwrap();
+
+        assert!(!moved);
+        assert!(!path.exists());
+        assert_eq!(read_refresh_token(&entry).unwrap(), None);
+    }
+
+    #[test]
+    fn migration_still_deletes_the_plaintext_file_if_the_store_is_unavailable() {
+        let dir = TempDir::new().unwrap();
+        let path = write_file(&dir, "logininfo.json", r#"{"refreshToken":"legacy-token"}"#);
+
+        let broken = keyring::mock::MockCredential::default();
+        broken.set_error(keyring::Error::NoStorageAccess(Box::new(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "no secret service",
+        ))));
+        let entry = keyring::Entry::new_with_credential(Box::new(broken));
+
+        let moved = migrate_legacy_login_file(&path, &entry).unwrap();
+
+        assert!(!moved, "token could not be stored");
+        assert!(!path.exists(), "but the plaintext copy must not stay on disk");
+    }
 }
